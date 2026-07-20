@@ -1,0 +1,15 @@
+.git
+.github
+.agents
+.codex
+.impeccable
+target
+data
+results*.txt
+results*.md
+*.jsonl
+*.jsonl.zst
+*.db
+*.sqlite
+*.sqlite3
+docs/wiki

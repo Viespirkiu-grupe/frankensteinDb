@@ -1,0 +1,103 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FrankensteinDB API",
+    "version": "0.2.0",
+    "description": "Typed JSON API. SQLite is authoritative for writes; every supported read executes through Tantivy."
+  },
+  "servers": [{ "url": "http://127.0.0.1:8080" }],
+  "security": [{ "bearerAuth": [] }, {}],
+  "paths": {
+    "/health": { "get": { "security": [], "summary": "Liveness", "responses": { "200": { "description": "Healthy" } } } },
+    "/metrics": { "get": { "security": [], "summary": "Prometheus metrics", "responses": { "200": { "description": "Prometheus text format" } } } },
+    "/openapi.json": { "get": { "security": [], "summary": "OpenAPI document", "responses": { "200": { "description": "OpenAPI JSON" } } } },
+    "/api/v1/tables": {
+      "get": { "summary": "List published table definitions", "responses": { "200": { "description": "Tables" } } },
+      "post": { "summary": "Create table", "requestBody": { "$ref": "#/components/requestBodies/Table" }, "responses": { "201": { "description": "Created" } } }
+    },
+    "/api/v1/tables/{table}": {
+      "parameters": [{ "$ref": "#/components/parameters/Table" }],
+      "get": { "summary": "Get table definition", "responses": { "200": { "description": "Table" } } },
+      "delete": { "summary": "Drop table", "responses": { "204": { "description": "Dropped" } } }
+    },
+    "/api/v1/tables/{table}/rows": {
+      "parameters": [{ "$ref": "#/components/parameters/Table" }],
+      "get": { "summary": "List rows through Tantivy", "responses": { "200": { "$ref": "#/components/responses/Rows" } } },
+      "post": { "summary": "Insert row", "parameters": [{ "$ref": "#/components/parameters/Deferred" }], "requestBody": { "$ref": "#/components/requestBodies/Object" }, "responses": { "201": { "$ref": "#/components/responses/Operation" } } },
+      "patch": { "summary": "Update rows matching a filter", "parameters": [{ "$ref": "#/components/parameters/Deferred" }, { "$ref": "#/components/parameters/DryRun" }, { "$ref": "#/components/parameters/MaxRows" }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateBody" } } } }, "responses": { "200": { "$ref": "#/components/responses/Operation" }, "423": { "$ref": "#/components/responses/Error" } } },
+      "delete": { "summary": "Delete rows matching a filter", "parameters": [{ "$ref": "#/components/parameters/Deferred" }, { "$ref": "#/components/parameters/DryRun" }, { "$ref": "#/components/parameters/MaxRows" }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["filter"], "properties": { "filter": { "$ref": "#/components/schemas/Filter" } } } } } }, "responses": { "200": { "$ref": "#/components/responses/Operation" } } }
+    },
+    "/api/v1/tables/{table}/rows/{key}": {
+      "parameters": [{ "$ref": "#/components/parameters/Table" }, { "$ref": "#/components/parameters/Key" }],
+      "get": { "summary": "Get row with ETag", "responses": { "200": { "description": "Row; ETag response header" }, "404": { "$ref": "#/components/responses/Error" } } },
+      "put": { "summary": "Fully replace non-primary-key fields", "parameters": [{ "$ref": "#/components/parameters/Deferred" }, { "$ref": "#/components/parameters/IfMatch" }], "requestBody": { "$ref": "#/components/requestBodies/Object" }, "responses": { "200": { "$ref": "#/components/responses/Operation" }, "412": { "$ref": "#/components/responses/Error" } } },
+      "patch": { "summary": "Partially update row", "parameters": [{ "$ref": "#/components/parameters/Deferred" }, { "$ref": "#/components/parameters/IfMatch" }], "requestBody": { "$ref": "#/components/requestBodies/Object" }, "responses": { "200": { "$ref": "#/components/responses/Operation" }, "412": { "$ref": "#/components/responses/Error" } } },
+      "delete": { "summary": "Delete row", "parameters": [{ "$ref": "#/components/parameters/Deferred" }, { "$ref": "#/components/parameters/IfMatch" }], "responses": { "200": { "$ref": "#/components/responses/Operation" } } }
+    },
+    "/api/v1/tables/{table}/query": {
+      "parameters": [{ "$ref": "#/components/parameters/Table" }],
+      "post": { "summary": "Concurrent Tantivy query with optional aggregation tree", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReadBody" } } } }, "responses": { "200": { "$ref": "#/components/responses/Rows" } } }
+    },
+    "/api/v1/tables/{table}/aggregate-intermediate": { "parameters": [{ "$ref": "#/components/parameters/Table" }], "post": { "summary": "Collect a mergeable Tantivy aggregation result for one shard", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReadBody" } } } }, "responses": { "200": { "description": "Versioned hex-encoded Tantivy intermediate result" }, "400": { "$ref": "#/components/responses/Error" } } } },
+    "/api/v1/tables/{table}/aggregate-merge": { "parameters": [{ "$ref": "#/components/parameters/Table" }], "post": { "summary": "Merge distributed Tantivy aggregation results", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AggregationMerge" } } } }, "responses": { "200": { "description": "Final merged aggregation tree" }, "400": { "$ref": "#/components/responses/Error" } } } },
+    "/api/v1/tables/{table}/explain": { "parameters": [{ "$ref": "#/components/parameters/Table" }], "post": { "summary": "Explain query collector", "responses": { "200": { "description": "Plan" } } } },
+    "/api/v1/tables/{table}/rows/{key}/explain-score": { "parameters": [{ "$ref": "#/components/parameters/Table" }, { "$ref": "#/components/parameters/Key" }], "post": { "summary": "Explain one hit's Tantivy BM25 score", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReadBody" } } } }, "responses": { "200": { "description": "Recursive Tantivy score explanation" }, "400": { "$ref": "#/components/responses/Error" } } } },
+    "/api/v1/tables/{table}/profile": { "parameters": [{ "$ref": "#/components/parameters/Table" }], "post": { "summary": "Execute and profile a Tantivy query", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReadBody" } } } }, "responses": { "200": { "description": "Phase timings and counts" } } } },
+    "/api/v1/tables/{table}/rows/{key}/similar": { "parameters": [{ "$ref": "#/components/parameters/Table" }, { "$ref": "#/components/parameters/Key" }], "post": { "summary": "Find lexically similar rows with Tantivy MoreLikeThis", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MoreLikeThis" } } } }, "responses": { "200": { "$ref": "#/components/responses/Rows" }, "404": { "$ref": "#/components/responses/Error" } } } },
+    "/api/v1/tables/{table}/facets/{column}": { "parameters": [{ "$ref": "#/components/parameters/Table" }, { "name": "column", "in": "path", "required": true, "schema": { "type": "string" } }], "post": { "summary": "Count hierarchical facet children", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "root": { "type": "string", "default": "/" }, "limit": { "type": "integer", "minimum": 1, "maximum": 10000 }, "filter": { "$ref": "#/components/schemas/Filter" } } } } } }, "responses": { "200": { "description": "Facet child counts" } } } },
+    "/api/v1/tables/{table}/aliases": { "parameters": [{ "$ref": "#/components/parameters/Table" }], "put": { "summary": "Atomically replace table aliases", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "array", "items": { "type": "string" } } } } }, "responses": { "200": { "description": "Updated table definition" } } } },
+    "/api/v1/tables/{table}/imports": {
+      "parameters": [{ "$ref": "#/components/parameters/Table" }],
+      "post": { "summary": "Upload identity, gzip, or zstd NDJSON for async chunked upsert", "parameters": [{ "name": "on_error", "in": "query", "schema": { "enum": ["abort", "skip"], "default": "abort" } }, { "name": "batch_size", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 50000, "default": 5000 } }], "requestBody": { "required": true, "content": { "application/x-ndjson": { "schema": { "type": "string", "format": "binary" } } } }, "responses": { "202": { "$ref": "#/components/responses/Job" } } }
+    },
+    "/api/v1/tables/{table}/schema-changes": { "parameters": [{ "$ref": "#/components/parameters/Table" }], "post": { "summary": "Start shadow-table schema migration", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/SchemaChange" } } } } }, "responses": { "202": { "$ref": "#/components/responses/Job" } } } },
+    "/api/v1/tables/{table}/reindex": { "parameters": [{ "$ref": "#/components/parameters/Table" }], "post": { "summary": "Start reindex job", "responses": { "202": { "$ref": "#/components/responses/Job" } } } },
+    "/api/v1/tables/{table}/optimize": { "parameters": [{ "$ref": "#/components/parameters/Table" }], "post": { "summary": "Start segment optimization job", "responses": { "202": { "$ref": "#/components/responses/Job" } } } },
+    "/api/v1/jobs": { "get": { "summary": "List persistent jobs", "responses": { "200": { "description": "Jobs" } } } },
+    "/api/v1/jobs/{id}": { "parameters": [{ "$ref": "#/components/parameters/JobId" }], "get": { "summary": "Get job", "responses": { "200": { "$ref": "#/components/responses/Job" } } }, "delete": { "summary": "Cancel job", "responses": { "204": { "description": "Cancelled" } } } },
+    "/api/v1/jobs/{id}/retry": { "parameters": [{ "$ref": "#/components/parameters/JobId" }], "post": { "summary": "Retry maintenance job", "responses": { "202": { "$ref": "#/components/responses/Job" } } } },
+    "/api/v1/jobs/{id}/artifact": { "parameters": [{ "$ref": "#/components/parameters/JobId" }], "get": { "summary": "Download completed job artifact", "responses": { "200": { "description": "Artifact stream" } } } },
+    "/api/v1/backups": { "post": { "summary": "Start portable backup job", "responses": { "202": { "$ref": "#/components/responses/Job" } } } },
+    "/api/v1/auth/reload": { "post": { "summary": "Reload hashed API key configuration", "responses": { "200": { "description": "Keys loaded" } } } },
+    "/api/v1/audit": { "get": { "summary": "List latest audit records", "responses": { "200": { "description": "Audit records" } } } },
+    "/api/v1/mutations": { "post": { "summary": "Apply atomic mutation batch", "responses": { "200": { "description": "Results" } } } },
+    "/api/v1/flush": { "post": { "summary": "Publish deferred mutations", "responses": { "204": { "description": "Flushed" } } } }
+  },
+  "components": {
+    "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
+    "parameters": {
+      "Table": { "name": "table", "in": "path", "required": true, "schema": { "type": "string" } },
+      "Key": { "name": "key", "in": "path", "required": true, "schema": { "type": "string" } },
+      "JobId": { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } },
+      "Deferred": { "name": "deferred", "in": "query", "schema": { "type": "boolean", "default": false } },
+      "DryRun": { "name": "dry_run", "in": "query", "schema": { "type": "boolean", "default": false } },
+      "MaxRows": { "name": "max_rows", "in": "query", "schema": { "type": "integer", "minimum": 0 } },
+      "IfMatch": { "name": "If-Match", "in": "header", "schema": { "type": "string" } }
+    },
+    "requestBodies": {
+      "Object": { "required": true, "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+      "Table": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TableDef" } } } }
+    },
+    "responses": {
+      "Rows": { "description": "Rows and optional aggregations", "content": { "application/json": { "schema": { "type": "object" } } } },
+      "Operation": { "description": "Mutation result", "content": { "application/json": { "schema": { "type": "object" } } } },
+      "Job": { "description": "Persistent job", "content": { "application/json": { "schema": { "type": "object" } } } },
+      "Error": { "description": "JSON error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    },
+    "schemas": {
+      "TableDef": { "type": "object", "required": ["name", "columns"], "properties": { "name": { "type": "string" }, "aliases": { "type": "array", "items": { "type": "string" }, "default": [] }, "document_store": { "$ref": "#/components/schemas/DocumentStore" }, "columns": { "type": "array", "items": { "$ref": "#/components/schemas/ColumnDef" } } } },
+      "DocumentStore": { "type": "object", "properties": { "compression": { "enum": ["lz4", "zstd", "none"], "default": "lz4" }, "zstd_level": { "type": ["integer", "null"], "description": "Zstd default level 3 when omitted" }, "block_size": { "type": "integer", "minimum": 1024, "maximum": 16777216, "default": 16384 }, "dedicated_thread": { "type": "boolean", "default": true } } },
+      "ColumnDef": { "type": "object", "required": ["name", "data_type", "primary_key", "nullable"], "properties": { "name": { "type": "string" }, "data_type": { "enum": ["Integer", "Unsigned", "Real", "Text", "Boolean", "Date", "DateTime", "Timestamp", "TextArray", "IntegerArray", "UnsignedArray", "RealArray", "BooleanArray", "DateArray", "DateTimeArray", "TimestampArray", "BlobArray", "IpArray", "JsonArray", "FacetArray", "Blob", "Ip", "Json", "Facet"] }, "primary_key": { "type": "boolean" }, "nullable": { "type": "boolean" }, "analyzer": {}, "compact_raw": { "type": "boolean", "default": false }, "index": { "$ref": "#/components/schemas/IndexProfile" } } },
+      "IndexProfile": { "type": "object", "properties": { "indexed": { "type": "boolean", "default": true }, "record": { "enum": ["basic", "frequencies", "positions"], "default": "positions" }, "stored": { "type": "boolean", "default": false } } },
+      "Filter": { "type": "object", "required": ["kind"], "description": "compare, between, in, is_null, search, search_boosted, disjunction_max, fuzzy, prefix, phrase_prefix, regex, regex_phrase, json_search, json_compare, json_between, json_exists, all, any, or not. Typed JSON paths use string, i64, u64, f64, bool, or date_time and are checked against Tantivy's observed dynamic type." },
+      "UpdateBody": { "type": "object", "required": ["filter", "values"], "properties": { "filter": { "$ref": "#/components/schemas/Filter" }, "values": { "type": "object", "additionalProperties": true } } },
+      "ReadBody": { "type": "object", "properties": { "projection": { "type": "array" }, "filter": { "$ref": "#/components/schemas/Filter" }, "order_by": { "type": "array", "items": { "$ref": "#/components/schemas/Sort" } }, "limit": { "type": "integer", "minimum": 0, "maximum": 10000 }, "offset": { "type": "integer", "minimum": 0 }, "search_after": { "type": ["array", "null"], "items": {}, "description": "Opaque typed sort values copied from meta.next_search_after; cannot be combined with offset" }, "min_score": { "type": ["number", "null"] }, "aggregations": { "type": "object", "additionalProperties": { "$ref": "#/components/schemas/Aggregation" } } } },
+      "Sort": { "type": "object", "required": ["column"], "properties": { "column": { "type": "string" }, "json_path": { "type": ["string", "null"] }, "json_type": { "enum": ["string", "i64", "u64", "f64", "bool", "date_time", null] }, "descending": { "type": "boolean", "default": false } } },
+      "MoreLikeThis": { "type": "object", "properties": { "fields": { "type": "array", "items": { "type": "string" }, "default": [] }, "filter": { "$ref": "#/components/schemas/Filter" }, "min_doc_frequency": { "type": "integer", "minimum": 0, "default": 2 }, "max_doc_frequency": { "type": ["integer", "null"], "minimum": 0 }, "min_term_frequency": { "type": "integer", "minimum": 0, "default": 1 }, "max_query_terms": { "type": "integer", "minimum": 1, "maximum": 1024, "default": 25 }, "min_word_length": { "type": ["integer", "null"] }, "max_word_length": { "type": ["integer", "null"] }, "boost_factor": { "type": "number", "exclusiveMinimum": 0, "default": 1 }, "stop_words": { "type": "array", "items": { "type": "string" }, "default": [] }, "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 20 }, "min_score": { "type": ["number", "null"] } } },
+      "Aggregation": { "type": "object", "required": ["kind"], "description": "terms, histogram, date_histogram, range, json_terms, json_histogram, json_range, filter, composite, metric, or top_hits. Supports missing values, bucket ordering, hard/extended histogram bounds, keyed ranges, calendar composite sources, and recursive sub-aggregations." },
+      "AggregationMerge": { "type": "object", "required": ["aggregations", "payloads_hex"], "properties": { "aggregations": { "type": "object", "additionalProperties": { "$ref": "#/components/schemas/Aggregation" } }, "payloads_hex": { "type": "array", "minItems": 1, "maxItems": 1024, "items": { "type": "string", "pattern": "^[0-9a-fA-F]+$" } } } },
+      "SchemaChange": { "type": "object", "required": ["kind"], "description": "add_column, drop_column, rename_column, alter_column, or alter_document_store" },
+      "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" } } } } }
+    }
+  }
+}

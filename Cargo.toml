@@ -1,0 +1,47 @@
+[package]
+name = "frankensteindb"
+version = "0.2.0"
+edition = "2024"
+description = "A search-first database backed by SQLite and Tantivy"
+license = "AGPL-3.0-only"
+autobins = false
+default-run = "frankensteindb"
+
+[[bin]]
+name = "frankensteindb"
+path = "src/main.rs"
+
+[[bin]]
+name = "frankensteindb-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "frankensteindb-benchmark"
+path = "src/bin/benchmark.rs"
+
+[profile.release]
+strip = "symbols"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.8"
+bincode = "1.3"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+flate2 = "1"
+futures-util = "0.3"
+hex = "0.4"
+rayon = "1.12"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tar = "0.4"
+tantivy = { version = "0.26.1", features = ["zstd-compression"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3.20"
+tower = { version = "0.5", features = ["util"] }

@@ -161,7 +161,13 @@ impl DynamicSortKeyComputer {
         let comparator = DynamicSortComparator {
             orders: fields
                 .iter()
-                .map(|field| ComparatorEnum::from(field.order))
+                .map(|field| match field.order {
+                    Order::Asc => ComparatorEnum::ReverseNoneLower,
+                    // The materialized sort puts nulls first for descending order. Tantivy's
+                    // default descending comparator puts them last, so select its explicit
+                    // null-high variant to keep both execution paths equivalent.
+                    Order::Desc => ComparatorEnum::NaturalNoneHigher,
+                })
                 .collect(),
         };
         Self { fields, comparator }

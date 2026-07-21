@@ -68,6 +68,12 @@ pub(crate) fn filter_after_cursor(
         "search_after does not support dynamic JSON path sorting"
     );
     ensure!(
+        order
+            .iter()
+            .all(|spec| { column(def, &spec.key).is_ok_and(|column| !column.nullable) }),
+        "search_after requires a non-nullable native scalar sort without scoring"
+    );
+    ensure!(
         values.len() == order.len(),
         "search_after requires {} sort value(s), including the primary-key tie-breaker",
         order.len()
@@ -126,7 +132,8 @@ pub(crate) fn cursor_pagination_enabled(
         && native_sort.is_some()
         && order.iter().all(|spec| {
             spec.json_type.is_none()
-                && column(def, &spec.key).is_ok_and(|column| column.index.indexed)
+                && column(def, &spec.key)
+                    .is_ok_and(|column| column.index.indexed && !column.nullable)
         })
 }
 

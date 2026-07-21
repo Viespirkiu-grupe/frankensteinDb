@@ -230,6 +230,23 @@ fn benchmark_reads(first_id: i64, first_row: &[Value]) -> Vec<(&'static str, Rea
             ),
         ),
         (
+            "edited_at_sorted_page",
+            read(
+                columns(&["unikalusId", "redagavimoData"]),
+                None,
+                vec![],
+                vec![Sort {
+                    column: "redagavimoData".into(),
+                    json_path: None,
+                    json_type: None,
+                    descending: true,
+                    geo_distance_from: None,
+                    geo_distance_mode: GeoDistanceMode::Min,
+                }],
+                20,
+            ),
+        ),
+        (
             "count_all",
             aggregation(
                 &[],

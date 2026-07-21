@@ -216,6 +216,47 @@ fn score_sort_keeps_the_bounded_top_docs_collector() {
 }
 
 #[test]
+fn nullable_sort_uses_bounded_top_docs_and_preserves_null_order() {
+    let (_directory, mut database) = database();
+    products(&mut database);
+    let mut request = read(
+        "products",
+        columns(&["id", "note"]),
+        None,
+        vec![Sort {
+            column: "note".into(),
+            json_path: None,
+            json_type: None,
+            descending: false,
+            geo_distance_from: None,
+            geo_distance_mode: GeoDistanceMode::Min,
+        }],
+    );
+
+    let plan = database.explain(&request).unwrap();
+    let collector = plan
+        .columns
+        .iter()
+        .position(|name| name == "collector")
+        .unwrap();
+    assert_eq!(plan.rows[0][collector], json!("fast_field_top_docs"));
+    assert_eq!(
+        database.read(request.clone()).unwrap().rows,
+        vec![
+            vec![json!(2), json!("sale")],
+            vec![json!(1), Value::Null],
+            vec![json!(3), Value::Null],
+        ]
+    );
+
+    request.order_by[0].descending = true;
+    request.limit = 1;
+    let result = database.read(request).unwrap();
+    assert_eq!(result.rows, vec![vec![json!(1), Value::Null]]);
+    assert_eq!(result.next_search_after, None);
+}
+
+#[test]
 fn typed_native_aggregations_cover_metrics_and_groups() {
     let (_directory, mut database) = database();
     products(&mut database);

@@ -46,8 +46,7 @@ pub(crate) fn typed_native_sort(
         }
         let column = column(def, &spec.key).ok()?;
         let geo_sort = spec.geo_distance_from.is_some();
-        if column.nullable
-            || (column.data_type.is_array() && !geo_sort)
+        if (column.data_type.is_array() && !geo_sort)
             || matches!(
                 column.data_type,
                 ColumnType::Ip | ColumnType::Json | ColumnType::Facet

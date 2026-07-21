@@ -55,7 +55,7 @@ mod tests {
             Some(&mut capture),
         )
         .unwrap();
-        assert_eq!(measurements.len(), 36);
+        assert_eq!(measurements.len(), 37);
         let capture_path = directory.path().join("results.txt");
         capture.save(&capture_path).unwrap();
         let captured = std::fs::read_to_string(capture_path).unwrap();

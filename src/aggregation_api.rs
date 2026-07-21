@@ -1,7 +1,9 @@
 mod compiler;
+mod executor;
 mod filter;
 mod values;
 
+pub(crate) use executor::{collect_standard_aggregations, standard_aggregation_worker_count};
 pub(super) use filter::typed_filter_aggregation;
 
 use bincode::Options;
@@ -78,10 +80,17 @@ pub(crate) fn merge_intermediates(request: Aggregations, payloads: &[Vec<u8>]) -
 }
 
 pub(crate) fn aggregation_context(index: &Index) -> AggContextParams {
-    AggContextParams::new(
+    aggregation_context_with_limits(
+        index,
         AggregationLimitsGuard::new(Some(128 * 1024 * 1024), Some(10_000)),
-        index.tokenizers().clone(),
     )
+}
+
+pub(crate) fn aggregation_context_with_limits(
+    index: &Index,
+    limits: AggregationLimitsGuard,
+) -> AggContextParams {
+    AggContextParams::new(limits, index.tokenizers().clone())
 }
 
 fn aggregation_hash(request: &Aggregations) -> Result<[u8; 32]> {

@@ -1,6 +1,6 @@
 use super::*;
 use crate::aggregation_api::{
-    aggregation_context, collect_intermediate, compile_aggregations, merge_intermediates,
+    collect_intermediate, collect_standard_aggregations, compile_aggregations, merge_intermediates,
 };
 use crate::database_read::{execute_typed_read, explain_typed_read, explain_typed_score};
 
@@ -98,16 +98,13 @@ impl SearchService {
         }
         let mut result = serde_json::Map::new();
         if !standard.is_empty() {
-            let request = compile_aggregations(&handle.def, &standard)?;
-            let collector =
-                AggregationCollector::from_aggs(request, aggregation_context(&handle.index));
-            let value = serde_json::to_value(searcher.search(&*query, &collector)?)?;
-            result.extend(
-                value
-                    .as_object()
-                    .context("Tantivy aggregation response is not an object")?
-                    .clone(),
-            );
+            result.extend(collect_standard_aggregations(
+                &searcher,
+                &*query,
+                &handle.def,
+                &handle.index,
+                standard,
+            )?);
         }
         for (name, aggregation) in geo {
             result.insert(

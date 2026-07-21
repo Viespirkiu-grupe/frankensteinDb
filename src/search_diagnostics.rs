@@ -1,4 +1,5 @@
 use super::*;
+use crate::aggregation_api::standard_aggregation_worker_count;
 use crate::database_read::execute_typed_read;
 
 impl SearchService {
@@ -36,6 +37,12 @@ impl SearchService {
         let count_ms = count_started.elapsed().as_secs_f64() * 1_000.0;
         let aggregation_started = std::time::Instant::now();
         let aggregation_count = aggregations.len();
+        let standard_aggregation_count = aggregations
+            .values()
+            .filter(|aggregation| !matches!(aggregation, Aggregation::GeoTileGrid { .. }))
+            .count();
+        let aggregation_workers =
+            standard_aggregation_worker_count(&searcher, standard_aggregation_count);
         if !aggregations.is_empty() {
             self.aggregate(&request.table, request.filter.as_ref(), aggregations)?;
         }
@@ -54,6 +61,7 @@ impl SearchService {
             "matched_documents": matched,
             "returned_rows": returned_rows,
             "profiled_aggregations": aggregation_count,
+            "aggregation_workers": aggregation_workers,
             "segments": searcher.segment_readers().len(),
             "timing_ms": {
                 "catalog_lookup": lookup_ms,

@@ -306,6 +306,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_endpoint_measures_requested_aggregations() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = router(AppState::open(directory.path(), None, None).unwrap());
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/tables",
+                serde_json::json!({
+                    "name":"profile_items",
+                    "columns":[
+                        {"name":"id","data_type":"Integer","primary_key":true,"nullable":false,"analyzer":null},
+                        {"name":"kind","data_type":"Text","primary_key":false,"nullable":false,"analyzer":"Raw"}
+                    ]
+                }),
+            ))
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/tables/profile_items/profile",
+                serde_json::json!({
+                    "limit":0,
+                    "aggregations":{
+                        "kinds":{"kind":"terms","column":"kind","size":10}
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["data"]["profiled_aggregations"], 1);
+        assert!(body["data"]["timing_ms"]["aggregations"].is_number());
+    }
+
+    #[tokio::test]
     async fn distributed_aggregation_endpoints_round_trip_opaque_fruits() {
         let directory = tempfile::tempdir().unwrap();
         let app = router(AppState::open(directory.path(), None, None).unwrap());

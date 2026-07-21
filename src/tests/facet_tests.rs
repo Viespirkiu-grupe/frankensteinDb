@@ -174,3 +174,104 @@ fn filter_aggregations_accept_typed_date_and_time_bounds() {
     assert_eq!(result["timestamps"]["doc_count"], json!(1));
     drop(directory);
 }
+
+#[test]
+fn filter_aggregations_use_typed_prefix_in_and_null_queries() {
+    let (_directory, mut database) = database();
+    database
+        .create_table_def(TableDef {
+            name: "filter_values".into(),
+            aliases: vec![],
+            document_store: Default::default(),
+            columns: vec![
+                test_column("id", ColumnType::Integer, true, false, None),
+                test_column(
+                    "codes",
+                    ColumnType::TextArray,
+                    false,
+                    false,
+                    Some(Analyzer::Raw),
+                ),
+                test_column("kind", ColumnType::Text, false, true, Some(Analyzer::Raw)),
+            ],
+        })
+        .unwrap();
+    database
+        .bulk_insert_json(
+            "filter_values",
+            &[
+                vec![json!(1), json!(["15800000-6"]), json!("SP")],
+                vec![json!(2), json!(["45230000-8"]), json!("MVP")],
+                vec![json!(3), json!(["45233100-0"]), Value::Null],
+            ],
+        )
+        .unwrap();
+
+    let filtered = |filter| Aggregation::Filter {
+        filter,
+        aggregations: BTreeMap::new(),
+    };
+    let aggregations = BTreeMap::from([
+        (
+            "code_prefix".into(),
+            filtered(Filter::Prefix {
+                column: "codes".into(),
+                value: "4523".into(),
+            }),
+        ),
+        (
+            "kind_prefix".into(),
+            filtered(Filter::Prefix {
+                column: "kind".into(),
+                value: "MV".into(),
+            }),
+        ),
+        (
+            "selected_codes".into(),
+            filtered(Filter::In {
+                column: "codes".into(),
+                values: vec![json!("15800000-6"), json!("45230000-8")],
+            }),
+        ),
+        (
+            "missing_kind".into(),
+            filtered(Filter::IsNull {
+                column: "kind".into(),
+                negated: false,
+            }),
+        ),
+    ]);
+    let profile_aggregations = aggregations.clone();
+    let result = database
+        .search_service()
+        .unwrap()
+        .aggregate("filter_values", None, aggregations)
+        .unwrap();
+
+    assert_eq!(result["code_prefix"]["doc_count"], json!(2));
+    assert_eq!(result["kind_prefix"]["doc_count"], json!(1));
+    assert_eq!(result["selected_codes"]["doc_count"], json!(2));
+    assert_eq!(result["missing_kind"]["doc_count"], json!(1));
+
+    let profile = database
+        .search_service()
+        .unwrap()
+        .profile_with_aggregations(
+            ReadRequest {
+                table: "filter_values".into(),
+                projection: vec![],
+                filter: None,
+                group_by: vec![],
+                order_by: vec![],
+                limit: 0,
+                offset: 0,
+                search_after: None,
+                min_score: None,
+            },
+            profile_aggregations,
+        )
+        .unwrap();
+    assert_eq!(profile["profiled_aggregations"], json!(4));
+    assert!(profile["timing_ms"]["aggregations"].is_number());
+    assert_eq!(profile["returned_rows"], json!(0));
+}

@@ -18,13 +18,24 @@ pub(crate) fn json_path_term(
     data_type: JsonPathType,
     value: &Value,
 ) -> Result<Term> {
+    json_path_term_for_schema(&index.schema(), def, column_name, path, data_type, value)
+}
+
+pub(crate) fn json_path_term_for_schema(
+    schema: &tantivy::schema::Schema,
+    def: &TableDef,
+    column_name: &str,
+    path: &str,
+    data_type: JsonPathType,
+    value: &Value,
+) -> Result<Term> {
     let column = column(def, column_name)?;
     ensure!(
         column.index.indexed,
         "JSON column is not indexed: {column_name}"
     );
     json_path_field(def, column_name, path)?;
-    let field = index.schema().get_field(&column.name)?;
+    let field = schema.get_field(&column.name)?;
     let mut term = Term::from_field_json_path(field, path, false);
     match data_type {
         JsonPathType::String => term.append_type_and_str(

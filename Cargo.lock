@@ -610,6 +610,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower",
+ "typetag",
  "zstd",
 ]
 

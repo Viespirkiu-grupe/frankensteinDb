@@ -4,6 +4,15 @@ use crate::database_read::execute_typed_read;
 impl SearchService {
     /// Executes a read and reports coarse compilation, matching, and materialization timings.
     pub fn profile(&self, request: ReadRequest) -> Result<Value> {
+        self.profile_with_aggregations(request, BTreeMap::new())
+    }
+
+    /// Executes the same row and aggregation work as the HTTP query endpoint and reports timings.
+    pub fn profile_with_aggregations(
+        &self,
+        request: ReadRequest,
+        aggregations: BTreeMap<String, Aggregation>,
+    ) -> Result<Value> {
         let started = std::time::Instant::now();
         let handle = self.handle(&request.table)?;
         let lookup_ms = started.elapsed().as_secs_f64() * 1_000.0;
@@ -25,18 +34,32 @@ impl SearchService {
         let count_started = std::time::Instant::now();
         let matched = searcher.search(&*plan.query, &Count)?;
         let count_ms = count_started.elapsed().as_secs_f64() * 1_000.0;
+        let aggregation_started = std::time::Instant::now();
+        let aggregation_count = aggregations.len();
+        if !aggregations.is_empty() {
+            self.aggregate(&request.table, request.filter.as_ref(), aggregations)?;
+        }
+        let aggregation_ms = aggregation_started.elapsed().as_secs_f64() * 1_000.0;
         let execute_started = std::time::Instant::now();
-        let result = execute_typed_read(&handle.def, &handle.index, &handle.reader, request)?;
+        let returned_rows = if request.limit == 0 {
+            0
+        } else {
+            execute_typed_read(&handle.def, &handle.index, &handle.reader, request)?
+                .rows
+                .len()
+        };
         let execute_ms = execute_started.elapsed().as_secs_f64() * 1_000.0;
         Ok(json!({
             "engine": "tantivy",
             "matched_documents": matched,
-            "returned_rows": result.rows.len(),
+            "returned_rows": returned_rows,
+            "profiled_aggregations": aggregation_count,
             "segments": searcher.segment_readers().len(),
             "timing_ms": {
                 "catalog_lookup": lookup_ms,
                 "query_compile": compile_ms,
                 "count": count_ms,
+                "aggregations": aggregation_ms,
                 "execute_and_materialize": execute_ms,
                 "total": started.elapsed().as_secs_f64() * 1_000.0
             }

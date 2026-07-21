@@ -40,6 +40,7 @@ tar = "0.4"
 tantivy = { version = "0.26.1", features = ["zstd-compression"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 tokio-util = { version = "0.7", features = ["io"] }
+typetag = "0.2"
 zstd = "0.13"
 
 [dev-dependencies]

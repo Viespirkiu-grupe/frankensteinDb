@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn compile_typed_comparison(
+pub(crate) fn compile_typed_comparison(
     def: &TableDef,
     fields: &IndexFields,
     name: &str,

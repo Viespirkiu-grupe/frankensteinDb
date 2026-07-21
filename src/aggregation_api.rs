@@ -1,5 +1,8 @@
 mod compiler;
+mod filter;
 mod values;
+
+pub(super) use filter::typed_filter_aggregation;
 
 use bincode::Options;
 use serde::{Deserialize, Serialize};

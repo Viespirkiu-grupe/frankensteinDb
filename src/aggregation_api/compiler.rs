@@ -201,7 +201,7 @@ fn aggregation_json(def: &TableDef, aggregation: &Aggregation, depth: usize) -> 
             aggregations,
         } => with_children(
             "filter",
-            json!(aggregation_filter_query(def, filter)?),
+            serde_json::to_value(typed_filter_aggregation(def, filter))?,
             aggregations,
         ),
         Aggregation::Composite {

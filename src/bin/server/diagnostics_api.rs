@@ -39,9 +39,10 @@ pub(crate) async fn profile(
     Path(table): Path<String>,
     ApiJson(body): ApiJson<ReadBody>,
 ) -> WebResult<Json<DataResponse<Value>>> {
+    let aggregations = body.aggregations.clone();
     let request = body.into_request(table);
     let result = state
-        .with_search(move |search| search.profile(request))
+        .with_search(move |search| search.profile_with_aggregations(request, aggregations))
         .await?;
     Ok(Json(DataResponse::new(result)))
 }

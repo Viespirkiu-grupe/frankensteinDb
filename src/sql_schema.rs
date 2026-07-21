@@ -65,10 +65,16 @@ pub(super) fn validate_table_def(def: &TableDef) -> Result<()> {
         if let Some(analyzer) = &column.analyzer {
             validate_analyzer(analyzer)?;
         }
-        if matches!(column.data_type, ColumnType::Facet | ColumnType::FacetArray) {
+        if matches!(
+            column.data_type,
+            ColumnType::Facet
+                | ColumnType::FacetArray
+                | ColumnType::GeoPoint
+                | ColumnType::GeoPointArray
+        ) {
             ensure!(
                 column.index.indexed,
-                "FACET columns are always indexed: {}",
+                "FACET and GEO_POINT columns are always indexed: {}",
                 column.name
             );
         }
@@ -184,7 +190,9 @@ pub(super) fn sqlite_create_sql(def: &TableDef) -> String {
                 | ColumnType::BlobArray
                 | ColumnType::IpArray
                 | ColumnType::JsonArray
-                | ColumnType::FacetArray => "TEXT",
+                | ColumnType::FacetArray
+                | ColumnType::GeoPoint
+                | ColumnType::GeoPointArray => "TEXT",
                 ColumnType::Unsigned
                 | ColumnType::Ip
                 | ColumnType::Json

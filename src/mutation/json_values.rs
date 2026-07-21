@@ -134,6 +134,12 @@ pub(crate) fn json_to_row_value(column: &ColumnDef, value: &Value) -> Result<Row
             );
             RowValue::JsonArray(values.clone())
         }
+        (ColumnType::GeoPoint, Value::Object(_)) => {
+            RowValue::GeoPoint(crate::geo::parse_geo_json(value, false)?[0])
+        }
+        (ColumnType::GeoPointArray, Value::Array(_)) => {
+            RowValue::GeoPointArray(crate::geo::parse_geo_json(value, true)?)
+        }
         _ => bail!("JSON value does not match type of column {}", column.name),
     };
     validate_row_value(column, &value)?;

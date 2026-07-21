@@ -176,9 +176,31 @@ fn validate_typed_sort(def: &TableDef, order: &[OrderSpec]) -> Result<()> {
             continue;
         }
         if spec.json_type.is_some() {
+            ensure!(
+                spec.geo_distance_from.is_none(),
+                "geo distance sorting cannot target a JSON path"
+            );
             continue;
         }
         if let Ok(column) = column(def, &spec.key) {
+            if let Some(origin) = spec.geo_distance_from {
+                origin.validate()?;
+                ensure!(
+                    matches!(
+                        column.data_type,
+                        ColumnType::GeoPoint | ColumnType::GeoPointArray
+                    ),
+                    "geo distance sorting requires a GEO_POINT or GEO_POINT[] column"
+                );
+                continue;
+            }
+            ensure!(
+                !matches!(
+                    column.data_type,
+                    ColumnType::GeoPoint | ColumnType::GeoPointArray
+                ),
+                "GEO_POINT sorting requires geo_distance_from"
+            );
             ensure!(
                 !column.data_type.is_array(),
                 "array columns cannot be sorted"

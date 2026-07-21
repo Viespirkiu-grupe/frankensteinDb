@@ -90,6 +90,8 @@ fn filter_based_update_and_delete_use_tantivy_candidates() {
                 json_path: None,
                 json_type: None,
                 descending: false,
+                geo_distance_from: None,
+                geo_distance_mode: GeoDistanceMode::Min,
             }],
         ))
         .unwrap();

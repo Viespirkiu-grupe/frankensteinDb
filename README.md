@@ -50,6 +50,8 @@ Do not run the large dataset benchmark as part of routine verification.
 Create tables with `TableDef`. Exactly one `Integer` or `Text` column must be the primary key.
 Supported column types are `Integer`, `Unsigned`, `Real`, `Text`, `Boolean`, `Date`, `DateTime`,
 `Timestamp`, `TextArray`, `IntegerArray`, `Blob`, `Ip`, `Json`, and hierarchical `Facet`.
+The model also supports `GeoPoint` and `GeoPointArray`, with exact radius/bounds queries, distance
+projection and sorting, cursor paging, and dynamic zoom 0–31 map-tile aggregation.
 All scalar families also have an `Array` variant, including numeric, boolean, temporal, BLOB, IP,
 JSON-object, and facet arrays. Tantivy indexes them as native repeated values and retains the
 canonical array in a fast field.

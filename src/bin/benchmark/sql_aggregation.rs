@@ -185,6 +185,15 @@ pub(crate) fn aggregation_expression(aggregation: &Aggregation) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Aggregation::GeoTileGrid {
+            column,
+            zoom,
+            max_buckets,
+            count_mode,
+            bounds,
+        } => format!(
+            "GEO_TILE_GRID({column}, zoom => {zoom}, max_buckets => {max_buckets}, count_mode => {count_mode:?}, bounds => {bounds:?})"
+        ),
     }
 }
 

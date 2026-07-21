@@ -112,6 +112,39 @@ Available metric functions:
 
 For percentiles, provide values such as `"percents":[50,95,99]`.
 
+## Map tiles and heatmaps
+
+`geo_tile_grid` produces sparse Web Mercator XYZ buckets for a map or heatmap:
+
+```json
+{
+  "limit":0,
+  "filter":{"kind":"search","fields":["title"],"query":"hospital"},
+  "aggregations":{
+    "tiles":{
+      "kind":"geo_tile_grid",
+      "column":"locations",
+      "zoom":12,
+      "max_buckets":10000,
+      "count_mode":"documents",
+      "bounds":{"top_left":{"lat":56.5,"lon":20.8},"bottom_right":{"lat":53.8,"lon":26.9}}
+    }
+  }
+}
+```
+
+The response includes `zoom`, `count_mode`, and buckets containing `key` (`z/x/y`), `x`, `y`, and
+`doc_count`. Zoom may be any integer from 0 through 31 and is derived dynamically from one zoom-31
+Morton key. `documents` counts a row at most once in each tile; `points` counts every point, even
+when several points from one row occupy the same tile. In points mode, the response field remains
+named `doc_count` for aggregation-response compatibility.
+
+`bounds` is an optional exact WGS84 restriction and may cross the antimeridian. `max_buckets` is
+1–100,000 (default 10,000); exceeding it returns an error instead of allocating an unbounded map.
+Geo tile grids are top-level local aggregations. They cannot be nested, used as a distributed
+intermediate aggregation, or used as a generic terms aggregation. A request may mix top-level geo
+tile grids with normal top-level aggregations, but each geo grid performs its own segment traversal.
+
 ## Nested aggregations
 
 Each bucket aggregation accepts child `aggregations`. This example orders categories by their
@@ -165,6 +198,7 @@ Filter buckets are useful when several metrics should share one additional predi
 ```
 
 Use `top_hits` as a child aggregation to return representative documents per bucket.
+Geo-distance sorting is not supported inside `top_hits`.
 
 ## Composite buckets and pagination
 

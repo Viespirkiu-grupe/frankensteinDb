@@ -33,6 +33,8 @@ pub(crate) fn validate_row_value(column: &ColumnDef, value: &RowValue) -> Result
             | (ColumnType::Blob, RowValue::Blob(_))
             | (ColumnType::Ip | ColumnType::Facet, RowValue::Text(_))
             | (ColumnType::Json, RowValue::Json(_))
+            | (ColumnType::GeoPoint, RowValue::GeoPoint(_))
+            | (ColumnType::GeoPointArray, RowValue::GeoPointArray(_))
     );
     ensure!(
         valid,
@@ -111,6 +113,22 @@ pub(crate) fn validate_row_value(column: &ColumnDef, value: &RowValue) -> Result
             "FACET[] paths must start with '/': {}",
             column.name
         );
+    } else if matches!(
+        column.data_type,
+        ColumnType::GeoPoint | ColumnType::GeoPointArray
+    ) {
+        let points: &[crate::GeoPoint] = match value {
+            RowValue::GeoPoint(point) => std::slice::from_ref(point),
+            RowValue::GeoPointArray(points) => points,
+            _ => unreachable!(),
+        };
+        ensure!(
+            points.len() <= 10_000,
+            "geo arrays support at most 10000 points"
+        );
+        for point in points {
+            point.validate()?;
+        }
     }
     Ok(())
 }
@@ -202,6 +220,8 @@ pub(crate) fn row_value_from_ref(column: &ColumnDef, value: ValueRef<'_>) -> Res
                         .collect::<Result<Vec<_>, _>>()?,
                 ),
                 ColumnType::JsonArray => RowValue::JsonArray(serde_json::from_str(text)?),
+                ColumnType::GeoPoint => RowValue::GeoPoint(serde_json::from_str(text)?),
+                ColumnType::GeoPointArray => RowValue::GeoPointArray(serde_json::from_str(text)?),
                 ColumnType::Unsigned => RowValue::Unsigned(text.parse()?),
                 ColumnType::Json => RowValue::Json(serde_json::from_str(text)?),
                 _ => RowValue::Text(text.to_owned()),
@@ -243,6 +263,12 @@ pub(crate) fn sqlite_value(value: &RowValue) -> rusqlite::types::Value {
         RowValue::Json(value) => {
             rusqlite::types::Value::Text(serde_json::to_string(value).expect("serializable JSON"))
         }
+        RowValue::GeoPoint(point) => rusqlite::types::Value::Text(
+            serde_json::to_string(point).expect("serializable geo point"),
+        ),
+        RowValue::GeoPointArray(points) => rusqlite::types::Value::Text(
+            serde_json::to_string(points).expect("serializable geo array"),
+        ),
     }
 }
 
@@ -285,6 +311,14 @@ impl rusqlite::ToSql for SqliteRowValue<'_> {
             RowValue::Blob(value) => ToSqlOutput::Borrowed(ValueRef::Blob(value)),
             RowValue::Json(value) => ToSqlOutput::Owned(rusqlite::types::Value::Text(
                 serde_json::to_string(value)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,
+            )),
+            RowValue::GeoPoint(point) => ToSqlOutput::Owned(rusqlite::types::Value::Text(
+                serde_json::to_string(point)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,
+            )),
+            RowValue::GeoPointArray(points) => ToSqlOutput::Owned(rusqlite::types::Value::Text(
+                serde_json::to_string(points)
                     .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,
             )),
         })

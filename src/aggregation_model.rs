@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Filter, JsonPath, Sort};
+use crate::{Filter, GeoBounds, GeoTileCountMode, JsonPath, Sort};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -138,6 +138,17 @@ pub enum Aggregation {
         sort: Vec<Sort>,
         #[serde(default)]
         columns: Vec<String>,
+    },
+    /// Sparse Web Mercator XYZ tile counts generated from a zoom-31 Morton fast field.
+    GeoTileGrid {
+        column: String,
+        zoom: u8,
+        #[serde(default = "default_geo_max_buckets")]
+        max_buckets: usize,
+        #[serde(default)]
+        count_mode: GeoTileCountMode,
+        #[serde(default)]
+        bounds: Option<GeoBounds>,
     },
 }
 
@@ -275,4 +286,8 @@ pub enum CompositeSource {
 
 const fn default_bucket_size() -> usize {
     10
+}
+
+const fn default_geo_max_buckets() -> usize {
+    10_000
 }

@@ -13,6 +13,8 @@ pub(crate) fn stable_typed_order(def: &TableDef, request: &ReadRequest) -> Vec<O
                 .unwrap_or_else(|| sort.column.clone()),
             json_type: sort.json_type,
             asc: !sort.descending,
+            geo_distance_from: sort.geo_distance_from,
+            geo_distance_mode: sort.geo_distance_mode,
         })
         .collect::<Vec<_>>();
     if order.is_empty()
@@ -32,6 +34,8 @@ pub(crate) fn stable_typed_order(def: &TableDef, request: &ReadRequest) -> Vec<O
             key: primary_key.clone(),
             json_type: None,
             asc: true,
+            geo_distance_from: None,
+            geo_distance_mode: GeoDistanceMode::Min,
         });
     }
     order
@@ -73,11 +77,11 @@ pub(crate) fn filter_after_cursor(
     for index in 0..order.len() {
         let mut filters = Vec::with_capacity(index + 1);
         for previous in 0..index {
-            filters.push(Filter::Compare {
-                column: order[previous].key.clone(),
-                operator: Comparison::Equal,
-                value: values[previous].clone(),
-            });
+            filters.push(cursor_comparison(
+                &order[previous],
+                Comparison::Equal,
+                &values[previous],
+            )?);
         }
         let spec = &order[index];
         let column = column(def, &spec.key)?;
@@ -86,15 +90,15 @@ pub(crate) fn filter_after_cursor(
             "cursor column is not indexed: {}",
             spec.key
         );
-        filters.push(Filter::Compare {
-            column: spec.key.clone(),
-            operator: if spec.asc {
+        filters.push(cursor_comparison(
+            spec,
+            if spec.asc {
                 Comparison::Greater
             } else {
                 Comparison::Less
             },
-            value: values[index].clone(),
-        });
+            &values[index],
+        )?);
         alternatives.push(if filters.len() == 1 {
             filters.pop().expect("one cursor filter")
         } else {
@@ -130,9 +134,32 @@ pub(crate) fn cursor_values(row: &ResultRow, order: &[OrderSpec]) -> Result<Vec<
     order
         .iter()
         .map(|spec| {
-            row_value(row, &spec.key)
-                .cloned()
-                .ok_or_else(|| anyhow!("cursor sort value was not loaded: {}", spec.key))
+            let value = sort_row_value(row, spec);
+            ensure!(
+                !value.is_null(),
+                "cursor sort value was not loaded: {}",
+                spec.key
+            );
+            Ok(value)
         })
         .collect()
+}
+
+fn cursor_comparison(spec: &OrderSpec, operator: Comparison, value: &Value) -> Result<Filter> {
+    if let Some(center) = spec.geo_distance_from {
+        return Ok(Filter::GeoDistanceCompare {
+            column: spec.key.clone(),
+            center,
+            mode: spec.geo_distance_mode,
+            operator,
+            distance_meters: value
+                .as_f64()
+                .context("geo cursor distance must be numeric")?,
+        });
+    }
+    Ok(Filter::Compare {
+        column: spec.key.clone(),
+        operator,
+        value: value.clone(),
+    })
 }

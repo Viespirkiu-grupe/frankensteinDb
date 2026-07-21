@@ -30,6 +30,12 @@ pub(super) enum FastValues {
     Array(BytesColumn),
     Json(BytesColumn),
     Facet(BytesColumn),
+    Geo(BytesColumn),
+    GeoDistance {
+        coordinates: BytesColumn,
+        origin: GeoPoint,
+        mode: GeoDistanceMode,
+    },
 }
 
 impl FastValues {
@@ -42,6 +48,12 @@ impl FastValues {
             Self::Boolean(values) => values.first(doc_id).map(bool::to_u64),
             Self::Date(values) => values.first(doc_id).map(DateTime::to_u64),
             Self::Ip(_) => None,
+            Self::Geo(_) => None,
+            Self::GeoDistance {
+                coordinates,
+                origin,
+                mode,
+            } => geo_distance_value(coordinates, doc_id, *origin, *mode).map(f64::to_u64),
             Self::Blob(values) | Self::Array(values) | Self::Json(values) | Self::Facet(values) => {
                 values.ords().first(doc_id)
             }
@@ -59,6 +71,8 @@ impl FastValues {
             Self::Boolean(_) => OwnedValue::Bool(bool::from_u64(value)),
             Self::Date(_) => OwnedValue::Date(DateTime::from_u64(value)),
             Self::Ip(_) => OwnedValue::Null,
+            Self::Geo(_) => OwnedValue::Null,
+            Self::GeoDistance { .. } => OwnedValue::F64(f64::from_u64(value)),
             Self::Text(values) => {
                 let mut output = String::new();
                 values
@@ -135,6 +149,15 @@ impl ProjectedFastReader {
                 );
                 return Ok(Value::String(String::from_utf8(output)?));
             }
+            FastValues::Geo(values) => {
+                let points = geo_points_value(values, doc_id)?;
+                return Ok(if self.data_type == ColumnType::GeoPoint {
+                    points.first().map_or(Value::Null, |point| json!(point))
+                } else {
+                    json!(points)
+                });
+            }
+            FastValues::GeoDistance { .. } => unreachable!("distance reader is sort-only"),
         };
         value
             .map(|value| owned_to_json(value, &self.data_type))
@@ -173,6 +196,11 @@ pub(super) fn segment_fast_readers(
                     FastValues::Date(fast_fields.date(&field)?)
                 }
                 ColumnType::Ip => FastValues::Ip(fast_fields.ip_addr(&field)?),
+                ColumnType::GeoPoint | ColumnType::GeoPointArray => FastValues::Geo(
+                    fast_fields
+                        .bytes(&geo_coordinate_field(&column.name))?
+                        .ok_or_else(|| anyhow!("missing geo fast field: {}", column.name))?,
+                ),
                 data_type if data_type.is_array() => FastValues::Array(
                     fast_fields
                         .bytes(&field)?
@@ -209,6 +237,31 @@ pub(super) struct OrderSpec {
     pub(super) key: String,
     pub(super) json_type: Option<JsonPathType>,
     pub(super) asc: bool,
+    pub(super) geo_distance_from: Option<GeoPoint>,
+    pub(super) geo_distance_mode: GeoDistanceMode,
+}
+
+pub(super) fn geo_points_value(values: &BytesColumn, doc_id: DocId) -> Result<Vec<GeoPoint>> {
+    let Some(ord) = values.ords().first(doc_id) else {
+        return Ok(Vec::new());
+    };
+    let mut encoded = Vec::new();
+    ensure!(
+        values.ord_to_bytes(ord, &mut encoded)?,
+        "missing geo coordinate ordinal"
+    );
+    decode_points(&encoded)
+}
+
+pub(super) fn geo_distance_value(
+    values: &BytesColumn,
+    doc_id: DocId,
+    origin: GeoPoint,
+    mode: GeoDistanceMode,
+) -> Option<f64> {
+    geo_points_value(values, doc_id)
+        .ok()
+        .and_then(|points| distance_for_points(&points, origin, mode))
 }
 
 mod advanced_text;
@@ -220,6 +273,7 @@ mod scoring;
 mod typed_aggregation;
 mod typed_compiler;
 mod typed_projection;
+mod typed_values;
 
 pub(super) use advanced_text::*;
 pub(super) use aggregation::*;
@@ -230,3 +284,4 @@ pub(super) use scoring::*;
 pub(super) use typed_aggregation::*;
 pub(super) use typed_compiler::*;
 pub(super) use typed_projection::*;
+pub(super) use typed_values::*;

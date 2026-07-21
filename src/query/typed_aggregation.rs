@@ -82,6 +82,10 @@ fn typed_groups<'a>(def: &'a TableDef, request: &ReadRequest) -> Result<Vec<Type
                 !column.data_type.is_array(),
                 "array columns cannot be grouped"
             );
+            ensure!(
+                column.data_type != ColumnType::GeoPoint,
+                "geo columns cannot be grouped; use geo_tile_grid aggregation"
+            );
             Ok(TypedGroup {
                 column,
                 name: format!("__aq_group_{index}"),
@@ -101,6 +105,9 @@ fn validate_group_projection(request: &ReadRequest, groups: &[TypedGroup<'_>]) -
             ),
             Projection::Score { .. } => bail!("score cannot be selected with aggregation"),
             Projection::Highlight { .. } => bail!("highlight cannot be selected with aggregation"),
+            Projection::GeoDistance { .. } => {
+                bail!("geo distance cannot be selected with tabular aggregation")
+            }
             Projection::Aggregate { .. } => {}
         }
     }
@@ -273,6 +280,7 @@ fn typed_aggregation_row(
             }
             Projection::Score { .. } => bail!("score cannot be aggregated"),
             Projection::Highlight { .. } => bail!("highlight cannot be aggregated"),
+            Projection::GeoDistance { .. } => bail!("geo distance cannot be aggregated"),
         })
         .collect()
 }

@@ -64,6 +64,8 @@ fn typed_json_filters_exist_ranges_and_sort_use_dynamic_fast_fields() {
             json_path: Some("rank".into()),
             json_type: Some(JsonPathType::I64),
             descending: false,
+            geo_distance_from: None,
+            geo_distance_mode: GeoDistanceMode::Min,
         }],
     );
     assert_eq!(

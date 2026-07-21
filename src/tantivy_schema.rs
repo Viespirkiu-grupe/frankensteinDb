@@ -16,6 +16,7 @@ use tantivy::{DateTime, Index};
 
 use super::timestamp_to_tantivy;
 use crate::TextIndexRecord;
+use crate::geo::{geo_coordinate_field, geo_latitude_field, geo_longitude_field, index_geo_points};
 use crate::model::RowValue;
 use crate::sql_schema::{analyzer_name, language};
 use crate::synonym_filter::SynonymFilter;
@@ -27,6 +28,9 @@ pub(super) struct IndexFields {
     pub(super) values: HashMap<String, Field>,
     pub(super) raw: HashMap<String, Field>,
     pub(super) arrays: HashMap<String, Field>,
+    pub(super) geo_coordinates: HashMap<String, Field>,
+    pub(super) geo_latitudes: HashMap<String, Field>,
+    pub(super) geo_longitudes: HashMap<String, Field>,
 }
 
 pub(super) fn build_tantivy_schema(def: &TableDef) -> Schema {
@@ -124,8 +128,23 @@ pub(super) fn build_tantivy_schema(def: &TableDef) -> Schema {
                 builder.add_facet_field(&column.name, options);
                 builder.add_bytes_field(&format!("__aq_raw_{}", column.name), FAST);
             }
+            ColumnType::GeoPoint | ColumnType::GeoPointArray => {
+                builder.add_u64_field(&column.name, numeric_options(column));
+                builder.add_f64_field(
+                    &geo_latitude_field(&column.name),
+                    NumericOptions::default().set_fast().set_indexed(),
+                );
+                builder.add_f64_field(
+                    &geo_longitude_field(&column.name),
+                    NumericOptions::default().set_fast().set_indexed(),
+                );
+                builder.add_bytes_field(
+                    &geo_coordinate_field(&column.name),
+                    BytesOptions::default().set_fast(),
+                );
+            }
         }
-        if column.data_type.is_array() {
+        if column.data_type.is_array() && column.data_type != ColumnType::GeoPointArray {
             builder.add_bytes_field(
                 &format!("__aq_array_{}", column.name),
                 BytesOptions::default().set_fast(),
@@ -169,6 +188,9 @@ pub(super) fn schema_fields(schema: &Schema, def: &TableDef) -> Result<IndexFiel
     let mut values = HashMap::new();
     let mut raw = HashMap::new();
     let mut arrays = HashMap::new();
+    let mut geo_coordinates = HashMap::new();
+    let mut geo_latitudes = HashMap::new();
+    let mut geo_longitudes = HashMap::new();
     for column in &def.columns {
         values.insert(column.name.clone(), schema.get_field(&column.name)?);
         if matches!(
@@ -185,10 +207,27 @@ pub(super) fn schema_fields(schema: &Schema, def: &TableDef) -> Result<IndexFiel
                 .unwrap_or(values[&column.name]);
             raw.insert(column.name.clone(), raw_field);
         }
-        if column.data_type.is_array() {
+        if column.data_type.is_array() && column.data_type != ColumnType::GeoPointArray {
             arrays.insert(
                 column.name.clone(),
                 schema.get_field(&format!("__aq_array_{}", column.name))?,
+            );
+        }
+        if matches!(
+            column.data_type,
+            ColumnType::GeoPoint | ColumnType::GeoPointArray
+        ) {
+            geo_coordinates.insert(
+                column.name.clone(),
+                schema.get_field(&geo_coordinate_field(&column.name))?,
+            );
+            geo_latitudes.insert(
+                column.name.clone(),
+                schema.get_field(&geo_latitude_field(&column.name))?,
+            );
+            geo_longitudes.insert(
+                column.name.clone(),
+                schema.get_field(&geo_longitude_field(&column.name))?,
             );
         }
     }
@@ -196,6 +235,9 @@ pub(super) fn schema_fields(schema: &Schema, def: &TableDef) -> Result<IndexFiel
         values,
         raw,
         arrays,
+        geo_coordinates,
+        geo_latitudes,
+        geo_longitudes,
     })
 }
 
@@ -320,6 +362,14 @@ pub(super) fn add_sql_value(
                 doc.add_text(fields.raw[&column.name], text);
             }
         }
+        (ColumnType::GeoPoint | ColumnType::GeoPointArray, ValueRef::Text(v)) => {
+            let points = if column.data_type == ColumnType::GeoPoint {
+                vec![serde_json::from_slice(v)?]
+            } else {
+                serde_json::from_slice(v)?
+            };
+            index_geo_points(doc, fields, column, &points);
+        }
         (ColumnType::TextArray, ValueRef::Text(v)) => {
             let values: Vec<String> = serde_json::from_slice(v)
                 .with_context(|| format!("invalid TEXT[] JSON in {}", column.name))?;
@@ -403,6 +453,12 @@ pub(super) fn add_row_value(
             if fields.raw[&column.name] != field {
                 doc.add_text(fields.raw[&column.name], value);
             }
+        }
+        (ColumnType::GeoPoint, RowValue::GeoPoint(point)) => {
+            index_geo_points(doc, fields, column, std::slice::from_ref(point));
+        }
+        (ColumnType::GeoPointArray, RowValue::GeoPointArray(points)) => {
+            index_geo_points(doc, fields, column, points);
         }
         (ColumnType::TextArray, RowValue::TextArray(values)) => {
             for value in values {

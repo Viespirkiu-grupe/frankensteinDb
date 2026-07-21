@@ -111,6 +111,26 @@ pub enum Filter {
         #[serde(default)]
         negated: bool,
     },
+    /// Matches documents having any point within a great-circle radius.
+    GeoDistance {
+        column: String,
+        center: crate::GeoPoint,
+        radius_meters: f64,
+    },
+    /// Matches documents having any point inside a WGS84 rectangle.
+    GeoBoundingBox {
+        column: String,
+        bounds: crate::GeoBounds,
+    },
+    /// Compares a reduced document distance. Primarily used by stable geo cursors.
+    GeoDistanceCompare {
+        column: String,
+        center: crate::GeoPoint,
+        #[serde(default)]
+        mode: crate::GeoDistanceMode,
+        operator: Comparison,
+        distance_meters: f64,
+    },
     All {
         filters: Vec<Filter>,
     },

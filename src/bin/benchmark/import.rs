@@ -1,5 +1,5 @@
 use super::*;
-use frankensteindb::{Aggregate, Projection, ReadRequest, Sort};
+use frankensteindb::{Aggregate, GeoDistanceMode, Projection, ReadRequest, Sort};
 use rayon::prelude::*;
 
 pub(crate) fn existing_benchmark_state(
@@ -39,6 +39,8 @@ pub(crate) fn existing_benchmark_state(
                 json_path: None,
                 json_type: None,
                 descending: false,
+                geo_distance_from: None,
+                geo_distance_mode: GeoDistanceMode::Min,
             }],
             limit: 1,
             offset: 0,

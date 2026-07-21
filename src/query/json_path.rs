@@ -195,7 +195,9 @@ fn validate_aggregation_path(
         | Aggregation::Range { aggregations, .. }
         | Aggregation::Filter { aggregations, .. }
         | Aggregation::Composite { aggregations, .. } => (None, Some(aggregations)),
-        Aggregation::Metric { .. } | Aggregation::TopHits { .. } => (None, None),
+        Aggregation::Metric { .. }
+        | Aggregation::TopHits { .. }
+        | Aggregation::GeoTileGrid { .. } => (None, None),
     };
     if let Some(target) = target {
         validate_observed_type(

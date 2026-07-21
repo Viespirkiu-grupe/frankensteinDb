@@ -1,4 +1,6 @@
-use frankensteindb::{Aggregate, Comparison, Filter, Projection, ReadRequest, Sort};
+use frankensteindb::{
+    Aggregate, Comparison, Filter, GeoDistanceMode, Projection, ReadRequest, Sort,
+};
 use serde_json::json;
 
 use super::*;
@@ -221,6 +223,8 @@ fn benchmark_reads(first_id: i64, first_row: &[Value]) -> Vec<(&'static str, Rea
                     json_path: None,
                     json_type: None,
                     descending: true,
+                    geo_distance_from: None,
+                    geo_distance_mode: GeoDistanceMode::Min,
                 }],
                 20,
             ),
@@ -382,6 +386,8 @@ fn score_order() -> Vec<Sort> {
         json_path: None,
         json_type: None,
         descending: true,
+        geo_distance_from: None,
+        geo_distance_mode: GeoDistanceMode::Min,
     }]
 }
 fn compare(column: &str, operator: Comparison, value: Value) -> Filter {
@@ -446,6 +452,8 @@ fn grouped(
         json_path: None,
         json_type: None,
         descending: true,
+        geo_distance_from: None,
+        geo_distance_mode: GeoDistanceMode::Min,
     });
     request
 }

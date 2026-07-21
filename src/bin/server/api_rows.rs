@@ -418,6 +418,8 @@ fn list_request(
             json_path: None,
             json_type: None,
             descending,
+            geo_distance_from: None,
+            geo_distance_mode: frankensteindb::GeoDistanceMode::Min,
         }],
         limit,
         offset: params.offset,

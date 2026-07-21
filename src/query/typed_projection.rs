@@ -39,12 +39,15 @@ pub(crate) fn typed_native_sort(
                 field: spec.key.clone(),
                 data_type: json_path_column_type(data_type),
                 order: if spec.asc { Order::Asc } else { Order::Desc },
+                geo_distance_from: None,
+                geo_distance_mode: GeoDistanceMode::Min,
             });
             continue;
         }
         let column = column(def, &spec.key).ok()?;
+        let geo_sort = spec.geo_distance_from.is_some();
         if column.nullable
-            || column.data_type.is_array()
+            || (column.data_type.is_array() && !geo_sort)
             || matches!(
                 column.data_type,
                 ColumnType::Ip | ColumnType::Json | ColumnType::Facet
@@ -56,6 +59,8 @@ pub(crate) fn typed_native_sort(
             field: aggregation_field(column),
             data_type: column.data_type,
             order: if spec.asc { Order::Asc } else { Order::Desc },
+            geo_distance_from: spec.geo_distance_from,
+            geo_distance_mode: spec.geo_distance_mode,
         });
     }
     Some(NativeSort { fields })
@@ -83,6 +88,7 @@ pub(crate) fn required_typed_columns<'a>(
                     ..
                 } => Some(column.clone()),
                 Projection::Highlight { column, .. } => Some(column.clone()),
+                Projection::GeoDistance { column, .. } => Some(column.clone()),
                 Projection::Score { .. } | Projection::Aggregate { column: None, .. } => None,
             })
             .collect()
@@ -198,6 +204,19 @@ fn expanded_typed_projection(def: &TableDef, request: &ReadRequest) -> Result<Ve
                     "fragment_size must be 32..=4096"
                 );
             }
+            Projection::GeoDistance {
+                column: name, from, ..
+            } => {
+                let field = column(def, name)?;
+                ensure!(
+                    matches!(
+                        field.data_type,
+                        ColumnType::GeoPoint | ColumnType::GeoPointArray
+                    ),
+                    "geo_distance projection requires GEO_POINT or GEO_POINT[]"
+                );
+                from.validate()?;
+            }
             Projection::Aggregate { .. } => bail!("aggregate projection requires aggregation"),
         }
     }
@@ -211,6 +230,9 @@ pub(crate) fn typed_projection_name(item: &Projection) -> String {
         Projection::Highlight { column, alias, .. } => alias
             .clone()
             .unwrap_or_else(|| format!("{column}_highlight")),
+        Projection::GeoDistance { column, alias, .. } => alias
+            .clone()
+            .unwrap_or_else(|| format!("{column}_distance_meters")),
         Projection::Aggregate { alias, .. } => alias.clone(),
     }
 }
@@ -239,6 +261,16 @@ fn typed_scalar_value(
                     .map(Value::String)
             })
             .unwrap_or(Ok(Value::Null))
+        }
+        Projection::GeoDistance {
+            column, from, mode, ..
+        } => {
+            let value = row_value(row, column).context("geo distance source was not loaded")?;
+            let points = geo_points_from_json(value)?;
+            Ok(distance_for_points(&points, *from, *mode)
+                .and_then(Number::from_f64)
+                .map(Value::Number)
+                .unwrap_or(Value::Null))
         }
         Projection::Aggregate { .. } => bail!("aggregate projection requires aggregation"),
     }

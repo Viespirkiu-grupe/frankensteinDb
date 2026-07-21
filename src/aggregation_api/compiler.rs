@@ -45,6 +45,7 @@ fn aggregation_json(def: &TableDef, aggregation: &Aggregation, depth: usize) -> 
         } => {
             ensure!((1..=10_000).contains(size), "terms size must be 1..=10000");
             let column = column(def, name)?;
+            ensure_standard_bucket_column(column)?;
             let body = terms_body(
                 aggregation_field(column),
                 *size,
@@ -246,6 +247,9 @@ fn aggregation_json(def: &TableDef, aggregation: &Aggregation, depth: usize) -> 
             sort,
             columns,
         } => top_hits_json(def, *size, sort, columns, depth),
+        Aggregation::GeoTileGrid { .. } => {
+            bail!("geo_tile_grid is supported only as a top-level local aggregation")
+        }
     }
 }
 
@@ -394,34 +398,6 @@ fn metric_json(
     Ok(json!({kind: {"field": field, "percents": percents, "missing": missing}}))
 }
 
-fn top_hits_json(
-    def: &TableDef,
-    size: usize,
-    sort: &[Sort],
-    columns: &[String],
-    depth: usize,
-) -> Result<Value> {
-    ensure!(depth > 1, "top_hits must be a sub-aggregation");
-    ensure!((1..=100).contains(&size), "top_hits size must be 1..=100");
-    let sort = sort
-        .iter()
-        .map(|sort| {
-            let field = sort
-                .json_path
-                .as_ref()
-                .map(|path| json_path_field(def, &sort.column, path))
-                .transpose()?
-                .unwrap_or_else(|| sort.column.clone());
-            Ok(json!({field: order_name(sort.descending)}))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let columns = columns
-        .iter()
-        .map(|name| aggregation_column(def, name))
-        .collect::<Result<Vec<_>>>()?;
-    Ok(json!({"top_hits": {"size": size, "sort": sort, "docvalue_fields": columns}}))
-}
-
 fn composite_source_json(def: &TableDef, source: &CompositeSource) -> Result<Value> {
     let (name, kind, body) = match source {
         CompositeSource::Terms {
@@ -488,9 +464,6 @@ fn composite_source_json(def: &TableDef, source: &CompositeSource) -> Result<Val
     Ok(json!({name.clone(): {kind: body}}))
 }
 
-/// Tantivy's default placement is equivalent to FIRST for ascending sources and LAST for
-/// descending sources. Prefer that representation because interval composite sources otherwise
-/// treat an absent first-page cursor like an explicit missing cursor for these two combinations.
 const fn composite_missing_order(order: MissingOrder, descending: bool) -> MissingOrder {
     match (order, descending) {
         (MissingOrder::First, false) | (MissingOrder::Last, true) => MissingOrder::Default,

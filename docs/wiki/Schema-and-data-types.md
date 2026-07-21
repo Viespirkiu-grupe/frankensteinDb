@@ -54,6 +54,7 @@ Rules:
 | `Ip` | `"192.0.2.10"` | IPv4 or IPv6 |
 | `Json` | `{"source":"web"}` | Must be a JSON object |
 | `Facet` | `"/catalog/audio/headphones"` | Hierarchical path beginning with `/` |
+| `GeoPoint` | `{"lat":54.6872,"lon":25.2797}` | WGS84 latitude/longitude in degrees |
 
 `DateTime` and `Timestamp` are intentionally different. Use `DateTime` when the value identifies an
 instant globally. Use `Timestamp` when the source data has no timezone and adding one would change
@@ -77,9 +78,24 @@ Every scalar family that Tantivy can hold as repeated values has a corresponding
 | `IpArray` | `["192.0.2.1", "2001:db8::1"]` |
 | `JsonArray` | `[{"sku":"A"}, {"sku":"B"}]` |
 | `FacetArray` | `["/a/b", "/a/c"]` |
+| `GeoPointArray` | `[{"lat":54.6872,"lon":25.2797},{"lat":54.8985,"lon":23.9036}]` |
 
 An exact or range filter on an array matches a row when any array item matches. The canonical array
 is returned as an array; it is not flattened into duplicate rows.
+
+## Geographic points
+
+`GeoPoint` stores one coordinate and `GeoPointArray` stores zero or more equivalent coordinates.
+Latitude and longitude must be finite; latitude is `-90..=90` and longitude is `-180..=180`.
+Unknown coordinate object fields are rejected. Geo columns must be indexed and an array may contain
+at most 10,000 points.
+
+FrankensteinDB writes the exact coordinates to a Tantivy bytes fast field and a Web Mercator Morton
+key at zoom 31 to an indexed numeric fast field. This preserves latitude/longitude pairing for exact
+distance checks while allowing any requested tile zoom from 0 through 31 to be derived by a bit
+shift—there is no separate field per zoom. Web Mercator tile keys clamp polar latitudes to
+approximately `±85.051129`; exact distance and bounding-box operations retain the original WGS84
+latitude. A zoom-31 key occupies 62 bits, so it fits in Tantivy's `u64` fast field.
 
 ## Text analyzers
 

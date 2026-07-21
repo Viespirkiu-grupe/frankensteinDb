@@ -36,6 +36,12 @@ API responses stable when the schema grows.
 ]
 ```
 
+Distance can be returned in meters without reading SQLite:
+
+```json
+{"kind":"geo_distance","column":"locations","from":{"lat":54.6872,"lon":25.2797},"mode":"min","alias":"distance_m"}
+```
+
 Highlights are escaped HTML with matched tokens wrapped in `<b>`. They use Tantivy's
 `SnippetGenerator` and the actual field analyzer. Highlighting requires suitable indexed term
 information.
@@ -65,6 +71,25 @@ Other structural filters:
 
 `in` uses Tantivy's `TermSetQuery`, so large lists do not become thousands of Boolean clauses.
 Structural filters use constant scores and do not distort BM25 relevance.
+
+## Geographic filters
+
+Match a point inside a great-circle radius (meters):
+
+```json
+{"kind":"geo_distance","column":"locations","center":{"lat":54.6872,"lon":25.2797},"radius_meters":25000}
+```
+
+Match a rectangle:
+
+```json
+{"kind":"geo_bounding_box","column":"location","bounds":{"top_left":{"lat":55.0,"lon":24.8},"bottom_right":{"lat":54.4,"lon":25.8}}}
+```
+
+For `GeoPointArray`, a filter matches when any point matches. A bounding box whose western
+longitude is greater than its eastern longitude crosses the antimeridian. Radius search first uses
+indexed latitude/longitude ranges to find candidates and then applies exact Haversine distance, so
+the rectangular prefilter cannot create false-positive results.
 
 ## Combining filters
 
@@ -212,6 +237,17 @@ JSON-path sorting currently cannot use `search_after`.
 
 You can sort by native scalar columns, `_score`, projection aliases, and typed JSON paths. Deep
 pages should use `search_after` instead of increasing `offset`.
+
+Geo distance sorting uses the same `Sort` object with an origin and an array reduction:
+
+```json
+{"column":"locations","descending":false,"geo_distance_from":{"lat":54.6872,"lon":25.2797},"geo_distance_mode":"min"}
+```
+
+Modes are `min`, `max`, and `average`; scalar points produce the same value in every mode. The sort
+key and `geo_distance` projection are meters along a spherical Earth using the Haversine formula.
+Geo sorting supports `search_after` and retains the automatic primary-key tie-breaker. A null or
+empty point value cannot be used as the boundary row of a geo cursor.
 
 The first page needs an explicit non-nullable scalar sort. If more results exist, the response
 contains:

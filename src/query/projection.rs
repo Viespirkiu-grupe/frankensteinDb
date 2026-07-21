@@ -10,14 +10,8 @@ pub(crate) fn row_value<'a>(row: &'a ResultRow, name: &str) -> Option<&'a Value>
 pub(crate) fn sort_source(rows: &mut [ResultRow], order: &[OrderSpec]) -> Result<()> {
     for spec in order.iter().rev() {
         rows.sort_by(|left, right| {
-            let value = |row: &ResultRow| {
-                if spec.key.eq_ignore_ascii_case("_score") {
-                    json!(row.score)
-                } else {
-                    row_value(row, &spec.key).cloned().unwrap_or(Value::Null)
-                }
-            };
-            let comparison = compare_json(&value(left), &value(right));
+            let comparison =
+                compare_json(&sort_row_value(left, spec), &sort_row_value(right, spec));
             if spec.asc {
                 comparison
             } else {
@@ -26,6 +20,33 @@ pub(crate) fn sort_source(rows: &mut [ResultRow], order: &[OrderSpec]) -> Result
         });
     }
     Ok(())
+}
+
+pub(crate) fn sort_row_value(row: &ResultRow, spec: &OrderSpec) -> Value {
+    if spec.key.eq_ignore_ascii_case("_score") {
+        return json!(row.score);
+    }
+    let value = row_value(row, &spec.key).cloned().unwrap_or(Value::Null);
+    let Some(origin) = spec.geo_distance_from else {
+        return value;
+    };
+    geo_points_from_json(&value)
+        .ok()
+        .and_then(|points| distance_for_points(&points, origin, spec.geo_distance_mode))
+        .and_then(Number::from_f64)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
+}
+
+pub(crate) fn geo_points_from_json(value: &Value) -> Result<Vec<GeoPoint>> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    if value.is_array() {
+        crate::geo::parse_geo_json(value, true)
+    } else {
+        crate::geo::parse_geo_json(value, false)
+    }
 }
 
 pub(crate) fn sort_projected(
@@ -80,6 +101,8 @@ pub(crate) struct NativeSortField {
     pub(super) field: String,
     pub(super) data_type: ColumnType,
     pub(super) order: Order,
+    pub(super) geo_distance_from: Option<GeoPoint>,
+    pub(super) geo_distance_mode: GeoDistanceMode,
 }
 
 pub(crate) fn collect_native_sorted_docs(
@@ -171,6 +194,15 @@ fn sort_fast_values(
     fast_fields: &tantivy::fastfield::FastFieldReaders,
     field: &NativeSortField,
 ) -> tantivy::Result<FastValues> {
+    if let Some(origin) = field.geo_distance_from {
+        return Ok(FastValues::GeoDistance {
+            coordinates: fast_fields
+                .bytes(&geo_coordinate_field(&field.field))?
+                .ok_or_else(|| missing_fast_field(&field.field))?,
+            origin,
+            mode: field.geo_distance_mode,
+        });
+    }
     Ok(match field.data_type {
         ColumnType::Integer => FastValues::Integer(fast_fields.i64(&field.field)?),
         ColumnType::Unsigned => FastValues::Unsigned(fast_fields.u64(&field.field)?),
@@ -190,6 +222,11 @@ fn sort_fast_values(
                 .bytes(&field.field)?
                 .ok_or_else(|| missing_fast_field(&field.field))?,
         ),
+        ColumnType::GeoPoint | ColumnType::GeoPointArray => {
+            return Err(tantivy::TantivyError::SchemaError(
+                "geo sort requires geo_distance_from".into(),
+            ));
+        }
         data_type
             if data_type.is_array()
                 || matches!(data_type, ColumnType::Json | ColumnType::Facet) =>

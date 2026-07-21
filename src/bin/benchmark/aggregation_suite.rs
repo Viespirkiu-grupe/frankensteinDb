@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use frankensteindb::{
     Aggregation, AggregationRange, BucketOrder, CalendarInterval, Comparison, CompositeSource,
-    Filter, HistogramBounds, Metric, MissingOrder, SearchService, Sort,
+    Filter, GeoDistanceMode, HistogramBounds, Metric, MissingOrder, SearchService, Sort,
 };
 use serde_json::{Value, json};
 
@@ -268,6 +268,8 @@ fn top_hits_per_type() -> BTreeMap<String, Aggregation> {
             json_path: None,
             json_type: None,
             descending: true,
+            geo_distance_from: None,
+            geo_distance_mode: GeoDistanceMode::Min,
         }],
         columns: vec!["unikalusId".into(), "redagavimoData".into()],
     };

@@ -15,6 +15,7 @@ pub(crate) fn aggregation_field(column: &ColumnDef) -> String {
 pub(crate) fn existence_field(column: &ColumnDef) -> String {
     match &column.data_type {
         ColumnType::Text => aggregation_field(column),
+        ColumnType::GeoPointArray => column.name.clone(),
         data_type if data_type.is_array() => {
             format!("__aq_array_{}", column.name)
         }

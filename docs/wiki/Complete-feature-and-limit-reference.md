@@ -14,11 +14,14 @@ Blob          Ip             Json          Facet
 TextArray     IntegerArray   UnsignedArray RealArray
 BooleanArray  DateArray      DateTimeArray TimestampArray
 BlobArray     IpArray        JsonArray     FacetArray
+GeoPoint      GeoPointArray
 ```
 
 Primary keys are exactly one non-nullable `Integer` or `Text` column. Names beginning with `__aq_`
 and the virtual column name `_score` are reserved. Names are unique case-insensitively. Facet
 columns must remain indexed.
+Geo columns must remain indexed. `GeoPoint` is `{lat,lon}` and `GeoPointArray` is an array of those
+objects; coordinates are finite WGS84 degrees and arrays contain at most 10,000 points.
 
 ## Analyzer variants and validation
 
@@ -59,6 +62,7 @@ Zstd level (Tantivy uses level 3), and a dedicated compression thread.
 | `score` | optional `alias` |
 | `highlight` | `column`, optional `alias`, `fragment_size` 32–4,096 |
 | `aggregate` | `function`, optional `column`, required `alias` |
+| `geo_distance` | `column`, `from`, `mode` (`min`, `max`, `average`), optional `alias` |
 
 Simple projection aggregates are `count`, `sum`, `average`, `min`, and `max`. Recursive aggregation
 requests have the larger metric set listed below.
@@ -83,6 +87,9 @@ requests have the larger metric set listed below.
 | `json_compare` | `column`, `path`, `data_type`, `operator`, `value` | Boolean paths allow only equal/not-equal |
 | `json_between` | `column`, `path`, `data_type`, `lower`, `upper` | Inclusive typed bounds |
 | `json_exists` | `column`, `path`, optional `data_type`, `negated` | Type may be omitted for any scalar |
+| `geo_distance` | `column`, `center`, `radius_meters` | Exact Haversine radius; radius finite and non-negative |
+| `geo_bounding_box` | `column`, `bounds` | Exact rectangle; west > east crosses antimeridian |
+| `geo_distance_compare` | column, center, mode, operator, distance | Cursor-oriented reduced distance comparison |
 | `all` | `filters` | At least one child; logical AND |
 | `any` | `filters` | At least one child; logical OR |
 | `not` | `filter` | One child |
@@ -98,7 +105,8 @@ JSON path types: `string`, `i64`, `u64`, `f64`, `bool`, and `date_time`. `date_t
 
 ## Sorting and paging
 
-`Sort` fields are `column`, optional `json_path`, optional `json_type`, and `descending`.
+`Sort` fields are `column`, optional `json_path`, optional `json_type`, `descending`, optional
+`geo_distance_from`, and `geo_distance_mode` (`min`, `max`, or `average`).
 `ReadBody` fields are `projection`, `filter`, `group_by`, `order_by`, `limit`, `offset`,
 `search_after`, `min_score`, and `aggregations`.
 
@@ -108,6 +116,8 @@ JSON path types: `string`, `i64`, `u64`, `f64`, `bool`, and `date_time`. `date_t
 - Cursor values must include the automatically appended primary-key tie-breaker.
 - Cursor paging cannot combine with offset, aggregations, score sorting/projection, `min_score`,
   nullable/array sorting, or JSON-path sorting.
+- Geo-distance sorting is supported for scalar and array geo columns; a null/empty geo value cannot
+  be the cursor boundary.
 
 ## Recursive aggregation variants
 
@@ -124,6 +134,7 @@ JSON path types: `string`, `i64`, `u64`, `f64`, `bool`, and `date_time`. `date_t
 | `composite` | sources, size, after cursor, children |
 | `metric` | function, column or JSON path, percentiles, missing |
 | `top_hits` | size, sort, columns |
+| `geo_tile_grid` | geo column, zoom 0–31, max buckets, document/point count mode, optional bounds |
 
 Limits:
 
@@ -134,6 +145,7 @@ Limits:
 - Range aggregation: 1–1,000 buckets; keyed ranges require every key.
 - Composite: 1–16 named sources.
 - `top_hits`: child aggregation only, size 1–100.
+- `geo_tile_grid`: top-level/local only, 1–100,000 buckets; excluded from distributed payloads.
 - Distributed merge: 1–1,024 payloads and at most 256 MiB decoded payload data.
 
 Metric functions: `count`, `sum`, `average`, `min`, `max`, `cardinality`, `percentiles`, `stats`, and

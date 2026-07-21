@@ -112,6 +112,20 @@ fn projection_sql(projection: &Projection) -> String {
                 .map(|alias| format!(" AS {alias}"))
                 .unwrap_or_default()
         ),
+        Projection::GeoDistance {
+            column,
+            from,
+            mode,
+            alias,
+        } => format!(
+            "GEO_DISTANCE({column}, {}, {}, {mode:?}){}",
+            from.lat,
+            from.lon,
+            alias
+                .as_ref()
+                .map(|alias| format!(" AS {alias}"))
+                .unwrap_or_default()
+        ),
         Projection::Aggregate {
             function,
             column,
@@ -228,6 +242,33 @@ pub(crate) fn filter_sql(filter: &Filter) -> String {
         } => format!(
             "JSON_EXISTS({column}.{path}){}",
             if *negated { " = FALSE" } else { "" }
+        ),
+        Filter::GeoDistance {
+            column,
+            center,
+            radius_meters,
+        } => format!(
+            "GEO_DISTANCE({column}, {}, {}) <= {radius_meters}",
+            center.lat, center.lon
+        ),
+        Filter::GeoBoundingBox { column, bounds } => format!(
+            "GEO_BOUNDING_BOX({column}, {}, {}, {}, {})",
+            bounds.top_left.lat,
+            bounds.top_left.lon,
+            bounds.bottom_right.lat,
+            bounds.bottom_right.lon
+        ),
+        Filter::GeoDistanceCompare {
+            column,
+            center,
+            mode,
+            operator,
+            distance_meters,
+        } => format!(
+            "GEO_DISTANCE({column}, {}, {}, {mode:?}) {} {distance_meters}",
+            center.lat,
+            center.lon,
+            comparison_sql(*operator)
         ),
         Filter::All { filters } => joined_filters(filters, "AND"),
         Filter::Any { filters } => joined_filters(filters, "OR"),

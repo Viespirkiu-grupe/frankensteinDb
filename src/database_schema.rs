@@ -223,6 +223,8 @@ fn convert_value(target: &ColumnDef, value: RowValue) -> Result<RowValue> {
         RowValue::JsonArray(value) => json!(value),
         RowValue::Blob(value) => json!(format!("0x{}", hex::encode(value))),
         RowValue::Json(value) => value,
+        RowValue::GeoPoint(value) => json!(value),
+        RowValue::GeoPointArray(value) => json!(value),
     };
     json_to_row_value(target, &json)
 }

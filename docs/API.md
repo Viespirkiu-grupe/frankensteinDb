@@ -79,8 +79,9 @@ curl -X POST localhost:8080/api/v1/tables/products/query \
   }'
 ```
 
-Filters also include `search_boosted`, `disjunction_max`, `fuzzy`, `prefix`, `phrase_prefix`, and
-`json_search`. `in` uses Tantivy's deduplicating `TermSetQuery`, avoiding one boolean clause per
+Filters also include `search_boosted`, `disjunction_max`, `fuzzy`, `prefix`, `phrase_prefix`,
+`json_search`, `geo_distance`, and `geo_bounding_box`. `in` uses Tantivy's deduplicating
+`TermSetQuery`, avoiding one boolean clause per
 value for large sets. It has set/filter semantics and does not rank rows by how many requested
 values matched. Structural `compare`, `between`, `in`, `is_null`, cursor, and negation filters are
 wrapped in zero-valued Tantivy `ConstScoreQuery` nodes. They restrict matches without changing BM25;
@@ -112,6 +113,12 @@ silently coercing data:
 
 `json_exists` may omit `data_type` to match any scalar type at the path. JSON path sorting does not
 currently support `search_after`.
+
+Geo points use `{"lat":54.6872,"lon":25.2797}`. A sort adds `geo_distance_from` and optional
+`geo_distance_mode` (`min`, `max`, or `average`); projection kind `geo_distance` returns meters.
+Geo cursors are supported. Aggregation kind `geo_tile_grid` accepts zoom 0–31, `max_buckets`,
+`count_mode` (`documents` or `points`), and optional bounds for map heatmaps. Geo grids are local,
+top-level aggregations and are not part of distributed intermediate payloads.
 
 To explain why one hit received its score, send the query body to the primary-key resource:
 
@@ -298,7 +305,7 @@ committed generation before catalog publication, so existing readers remain usab
 ## Column types and index profiles
 
 Types are `Integer`, `Unsigned`, `Real`, `Text`, `Boolean`, `Date`, `DateTime`, `Timestamp`,
-`TextArray`, `IntegerArray`, `Blob`, `Ip`, `Json`, and `Facet`. JSON values must be objects; facet
+`TextArray`, `IntegerArray`, `Blob`, `Ip`, `Json`, `Facet`, `GeoPoint`, and `GeoPointArray`. JSON values must be objects; facet
 paths start with `/`. Unsigned values use SQLite TEXT internally to retain the full `u64` range.
 
 Every scalar family has a multi-value form: `TextArray`, `IntegerArray`, `UnsignedArray`,

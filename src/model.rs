@@ -31,6 +31,10 @@ pub enum ColumnType {
     Ip,
     Json,
     Facet,
+    /// One WGS84 longitude/latitude coordinate.
+    GeoPoint,
+    /// Zero or more WGS84 longitude/latitude coordinates.
+    GeoPointArray,
 }
 
 impl ColumnType {
@@ -50,6 +54,7 @@ impl ColumnType {
                 | Self::IpArray
                 | Self::JsonArray
                 | Self::FacetArray
+                | Self::GeoPointArray
         )
     }
 }
@@ -205,6 +210,8 @@ pub(crate) enum RowValue {
     JsonArray(Vec<Value>),
     Blob(Vec<u8>),
     Json(Value),
+    GeoPoint(crate::GeoPoint),
+    GeoPointArray(Vec<crate::GeoPoint>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,7 +263,7 @@ pub struct ReadRequest {
     pub min_score: Option<f32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 /// A selected column, relevance score, or aggregate metric.
 pub enum Projection {
@@ -272,6 +279,14 @@ pub enum Projection {
         alias: Option<String>,
         #[serde(default = "default_fragment_size")]
         fragment_size: usize,
+    },
+    /// Great-circle distance from a point column to a fixed origin, in meters.
+    GeoDistance {
+        column: String,
+        from: crate::GeoPoint,
+        #[serde(default)]
+        mode: crate::GeoDistanceMode,
+        alias: Option<String>,
     },
     Aggregate {
         function: Aggregate,
@@ -291,7 +306,7 @@ pub enum Aggregate {
     Max,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 /// One stable sort key. `column` may also name a projection alias or `_score`.
 pub struct Sort {
     pub column: String,
@@ -303,6 +318,12 @@ pub struct Sort {
     pub json_type: Option<JsonPathType>,
     #[serde(default)]
     pub descending: bool,
+    /// When present, sort a GEO_POINT or GEO_POINT[] column by great-circle distance.
+    #[serde(default)]
+    pub geo_distance_from: Option<crate::GeoPoint>,
+    /// Reduction for GEO_POINT[] distance sorting.
+    #[serde(default)]
+    pub geo_distance_mode: crate::GeoDistanceMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

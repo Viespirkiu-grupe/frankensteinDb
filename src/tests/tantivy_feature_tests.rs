@@ -80,6 +80,8 @@ fn regex_phrase_matches_token_patterns_and_respects_positions() {
                 json_path: None,
                 json_type: None,
                 descending: false,
+                geo_distance_from: None,
+                geo_distance_mode: GeoDistanceMode::Min,
             }],
         ))
         .unwrap();
@@ -166,6 +168,8 @@ fn regex_matches_analyzed_terms_without_requiring_positions() {
                 json_path: None,
                 json_type: None,
                 descending: false,
+                geo_distance_from: None,
+                geo_distance_mode: GeoDistanceMode::Min,
             }],
         ))
         .unwrap();

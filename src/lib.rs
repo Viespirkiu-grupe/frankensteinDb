@@ -50,6 +50,15 @@ pub use canonical::{canonical_contract_row, canonical_contract_table};
 mod filter;
 pub use filter::{Comparison, Filter};
 
+mod geo;
+pub use geo::{
+    GEO_MAX_ZOOM, GeoBounds, GeoDistanceMode, GeoPoint, GeoTileCountMode, haversine_distance_meters,
+};
+use geo::{
+    collect_geo_tile_grid, compile_geo_bounds, compile_geo_distance_comparison, compile_geo_radius,
+    contains_geo_aggregation, decode_points, distance_for_points, geo_coordinate_field,
+};
+
 mod aggregation_model;
 pub use aggregation_model::{
     Aggregation, AggregationRange, BucketOrder, CalendarInterval, CompositeSource, HistogramBounds,

@@ -1,5 +1,48 @@
 use super::*;
 
+pub(super) fn ensure_standard_bucket_column(column: &ColumnDef) -> Result<()> {
+    ensure!(
+        !matches!(
+            column.data_type,
+            ColumnType::GeoPoint | ColumnType::GeoPointArray
+        ),
+        "geo columns require geo_tile_grid aggregation"
+    );
+    Ok(())
+}
+
+pub(super) fn top_hits_json(
+    def: &TableDef,
+    size: usize,
+    sort: &[Sort],
+    columns: &[String],
+    depth: usize,
+) -> Result<Value> {
+    ensure!(depth > 1, "top_hits must be a sub-aggregation");
+    ensure!((1..=100).contains(&size), "top_hits size must be 1..=100");
+    let sort = sort
+        .iter()
+        .map(|sort| {
+            ensure!(
+                sort.geo_distance_from.is_none(),
+                "top_hits does not support geo distance sorting"
+            );
+            let field = sort
+                .json_path
+                .as_ref()
+                .map(|path| json_path_field(def, &sort.column, path))
+                .transpose()?
+                .unwrap_or_else(|| sort.column.clone());
+            Ok(json!({field: order_name(sort.descending)}))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let columns = columns
+        .iter()
+        .map(|name| aggregation_column(def, name))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!({"top_hits": {"size": size, "sort": sort, "docvalue_fields": columns}}))
+}
+
 pub(super) fn convert_bounds(
     column: &ColumnDef,
     bounds: Option<&HistogramBounds>,

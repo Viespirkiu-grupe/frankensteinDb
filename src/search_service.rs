@@ -87,10 +87,35 @@ impl SearchService {
         validate_json_aggregation_paths(&searcher, &handle.def, &aggregations)?;
         let fields = schema_fields(&handle.index.schema(), &handle.def)?;
         let query = compile_filter(&handle.index, &handle.def, &fields, filter)?.query;
-        let request = compile_aggregations(&handle.def, &aggregations)?;
-        let collector =
-            AggregationCollector::from_aggs(request, aggregation_context(&handle.index));
-        Ok(serde_json::to_value(searcher.search(&*query, &collector)?)?)
+        let mut standard = BTreeMap::new();
+        let mut geo = Vec::new();
+        for (name, aggregation) in aggregations {
+            if matches!(aggregation, Aggregation::GeoTileGrid { .. }) {
+                geo.push((name, aggregation));
+            } else {
+                standard.insert(name, aggregation);
+            }
+        }
+        let mut result = serde_json::Map::new();
+        if !standard.is_empty() {
+            let request = compile_aggregations(&handle.def, &standard)?;
+            let collector =
+                AggregationCollector::from_aggs(request, aggregation_context(&handle.index));
+            let value = serde_json::to_value(searcher.search(&*query, &collector)?)?;
+            result.extend(
+                value
+                    .as_object()
+                    .context("Tantivy aggregation response is not an object")?
+                    .clone(),
+            );
+        }
+        for (name, aggregation) in geo {
+            result.insert(
+                name,
+                collect_geo_tile_grid(&searcher, &*query, &handle.def, &aggregation)?,
+            );
+        }
+        Ok(Value::Object(result))
     }
 
     /// Collects a mergeable, versioned binary Tantivy aggregation result for one shard.
@@ -100,6 +125,10 @@ impl SearchService {
         filter: Option<&Filter>,
         aggregations: BTreeMap<String, Aggregation>,
     ) -> Result<Vec<u8>> {
+        ensure!(
+            !contains_geo_aggregation(&aggregations),
+            "geo_tile_grid does not support distributed intermediate results"
+        );
         let handle = self.handle(table)?;
         let searcher = handle.reader.searcher();
         validate_filter_only_json_paths(&searcher, &handle.def, filter)?;
@@ -117,6 +146,10 @@ impl SearchService {
         aggregations: BTreeMap<String, Aggregation>,
         payloads: &[Vec<u8>],
     ) -> Result<Value> {
+        ensure!(
+            !contains_geo_aggregation(&aggregations),
+            "geo_tile_grid does not support distributed intermediate results"
+        );
         let handle = self.handle(table)?;
         validate_json_aggregation_paths(&handle.reader.searcher(), &handle.def, &aggregations)?;
         merge_intermediates(compile_aggregations(&handle.def, &aggregations)?, payloads)

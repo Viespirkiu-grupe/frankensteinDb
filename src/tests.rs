@@ -5,6 +5,9 @@ mod support;
 use support::*;
 
 mod advanced_tests;
+mod geo_boundary_tests;
+mod geo_support;
+mod geo_tests;
 mod json_aggregation_tests;
 mod mutation_tests;
 mod query_tests;

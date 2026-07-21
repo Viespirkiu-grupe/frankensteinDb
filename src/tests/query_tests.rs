@@ -21,6 +21,8 @@ fn typed_reads_search_filter_sort_and_paginate_through_tantivy() {
             json_path: None,
             json_type: None,
             descending: false,
+            geo_distance_from: None,
+            geo_distance_mode: GeoDistanceMode::Min,
         }],
     );
     request.limit = 1;
@@ -52,6 +54,8 @@ fn large_in_filter_uses_set_semantics_and_deduplicates_terms() {
                 json_path: None,
                 json_type: None,
                 descending: false,
+                geo_distance_from: None,
+                geo_distance_mode: GeoDistanceMode::Min,
             }],
         ))
         .unwrap();
@@ -72,6 +76,8 @@ fn search_after_pages_by_sort_values_and_primary_key_tie_breaker() {
             json_path: None,
             json_type: None,
             descending: false,
+            geo_distance_from: None,
+            geo_distance_mode: GeoDistanceMode::Min,
         }],
     );
     request.limit = 1;
@@ -105,6 +111,8 @@ fn search_after_pages_by_sort_values_and_primary_key_tie_breaker() {
             json_path: None,
             json_type: None,
             descending: true,
+            geo_distance_from: None,
+            geo_distance_mode: GeoDistanceMode::Min,
         }],
     );
     descending.limit = 1;
@@ -138,6 +146,8 @@ fn typed_ranges_nulls_and_score_are_supported() {
                 json_path: None,
                 json_type: None,
                 descending: true,
+                geo_distance_from: None,
+                geo_distance_mode: GeoDistanceMode::Min,
             }],
         ))
         .unwrap();
@@ -165,6 +175,8 @@ fn typed_ranges_nulls_and_score_are_supported() {
                 json_path: None,
                 json_type: None,
                 descending: false,
+                geo_distance_from: None,
+                geo_distance_mode: GeoDistanceMode::Min,
             }],
         ))
         .unwrap();
@@ -187,6 +199,8 @@ fn score_sort_keeps_the_bounded_top_docs_collector() {
             json_path: None,
             json_type: None,
             descending: true,
+            geo_distance_from: None,
+            geo_distance_mode: GeoDistanceMode::Min,
         }],
     );
     request.limit = 20;
@@ -231,6 +245,8 @@ fn typed_native_aggregations_cover_metrics_and_groups() {
                 json_path: None,
                 json_type: None,
                 descending: true,
+                geo_distance_from: None,
+                geo_distance_mode: GeoDistanceMode::Min,
             }],
             limit: 10,
             offset: 0,

@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS __aq_jobs (
     table_name TEXT,
     state TEXT NOT NULL,
     progress REAL NOT NULL DEFAULT 0,
+    input_json TEXT,
     result_json TEXT,
     error TEXT,
     created_at TEXT NOT NULL,
@@ -37,6 +38,7 @@ pub(crate) struct Job {
     pub(crate) table: Option<String>,
     pub(crate) state: String,
     pub(crate) progress: f64,
+    pub(crate) input: Option<Value>,
     pub(crate) result: Option<Value>,
     pub(crate) error: Option<String>,
     pub(crate) created_at: String,
@@ -64,6 +66,7 @@ impl JobStore {
         std::fs::create_dir_all(root.join("jobs"))?;
         let connection = Connection::open(root.join("data.sqlite3"))?;
         connection.execute_batch(JOB_SQL)?;
+        ensure_input_column(&connection)?;
         let now = now();
         connection.execute(
             "UPDATE __aq_jobs SET state = 'interrupted', updated_at = ?1 WHERE state IN ('receiving', 'queued', 'running')",
@@ -75,12 +78,17 @@ impl JobStore {
         })
     }
 
-    pub(crate) fn create(&self, kind: &str, table: Option<String>) -> Result<Job> {
+    pub(crate) fn create_with_input(
+        &self,
+        kind: &str,
+        table: Option<String>,
+        input: Option<Value>,
+    ) -> Result<Job> {
         let connection = self.lock()?;
         let now = now();
         connection.execute(
-            "INSERT INTO __aq_jobs(kind, table_name, state, created_at, updated_at) VALUES (?1, ?2, 'queued', ?3, ?3)",
-            params![kind, table, now],
+            "INSERT INTO __aq_jobs(kind, table_name, state, input_json, created_at, updated_at) VALUES (?1, ?2, 'queued', ?3, ?4, ?4)",
+            params![kind, table, input.map(|value| value.to_string()), now],
         )?;
         self.get_with(&connection, connection.last_insert_rowid())?
             .context("created job disappeared")
@@ -88,7 +96,7 @@ impl JobStore {
 
     pub(crate) fn list(&self) -> Result<Vec<Job>> {
         let connection = self.lock()?;
-        let mut statement = connection.prepare("SELECT id, kind, table_name, state, progress, result_json, error, created_at, updated_at FROM __aq_jobs ORDER BY id DESC")?;
+        let mut statement = connection.prepare("SELECT id, kind, table_name, state, progress, input_json, result_json, error, created_at, updated_at FROM __aq_jobs ORDER BY id DESC")?;
         statement
             .query_map([], read_job)?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -210,7 +218,7 @@ impl JobStore {
     fn get_with(&self, connection: &Connection, id: i64) -> Result<Option<Job>> {
         connection
             .query_row(
-                "SELECT id, kind, table_name, state, progress, result_json, error, created_at, updated_at FROM __aq_jobs WHERE id=?1",
+                "SELECT id, kind, table_name, state, progress, input_json, result_json, error, created_at, updated_at FROM __aq_jobs WHERE id=?1",
                 [id],
                 read_job,
             )
@@ -226,18 +234,31 @@ impl JobStore {
 }
 
 fn read_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
-    let result: Option<String> = row.get(5)?;
+    let input: Option<String> = row.get(5)?;
+    let result: Option<String> = row.get(6)?;
     Ok(Job {
         id: row.get(0)?,
         kind: row.get(1)?,
         table: row.get(2)?,
         state: row.get(3)?,
         progress: row.get(4)?,
+        input: input.and_then(|json| serde_json::from_str(&json).ok()),
         result: result.and_then(|json| serde_json::from_str(&json).ok()),
-        error: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        error: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
+}
+
+fn ensure_input_column(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(__aq_jobs)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|column| column == "input_json") {
+        connection.execute("ALTER TABLE __aq_jobs ADD COLUMN input_json TEXT", [])?;
+    }
+    Ok(())
 }
 
 fn now() -> String {
@@ -254,10 +275,27 @@ mod tests {
         let database = frankensteindb::Database::open(directory.path()).unwrap();
         drop(database);
         let store = JobStore::open(directory.path()).unwrap();
-        let job = store.create("reindex", Some("items".into())).unwrap();
+        let job = store
+            .create_with_input("reindex", Some("items".into()), None)
+            .unwrap();
         store.running(job.id).unwrap();
         drop(store);
         let reopened = JobStore::open(directory.path()).unwrap();
         assert_eq!(reopened.get(job.id).unwrap().unwrap().state, "interrupted");
+    }
+
+    #[test]
+    fn job_input_survives_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = frankensteindb::Database::open(directory.path()).unwrap();
+        drop(database);
+        let store = JobStore::open(directory.path()).unwrap();
+        let input = serde_json::json!({"target_segments":3,"merge_threads":2});
+        let job = store
+            .create_with_input("optimize", Some("items".into()), Some(input.clone()))
+            .unwrap();
+        drop(store);
+        let reopened = JobStore::open(directory.path()).unwrap();
+        assert_eq!(reopened.get(job.id).unwrap().unwrap().input, Some(input));
     }
 }

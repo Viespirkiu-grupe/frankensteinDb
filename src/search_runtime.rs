@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
 
@@ -29,7 +29,7 @@ impl AggregationCacheKey {
 }
 
 pub(crate) struct SearchRuntime {
-    pub(crate) pool: rayon::ThreadPool,
+    pub(crate) pool: Arc<rayon::ThreadPool>,
     cache: Mutex<AggregationCache>,
     scheduled_warmups: Arc<Mutex<HashSet<(String, u64)>>>,
     warmup_fast_fields: bool,
@@ -37,18 +37,11 @@ pub(crate) struct SearchRuntime {
 
 impl SearchRuntime {
     pub(crate) fn new(options: SearchOptions) -> Result<Self> {
-        let worker_threads = if options.worker_threads == 0 {
-            std::thread::available_parallelism()
-                .map(usize::from)
-                .unwrap_or(1)
+        let pool = if options.worker_threads == 0 {
+            system_search_pool()?
         } else {
-            options.worker_threads
+            build_search_pool(options.worker_threads)?
         };
-        ensure!(worker_threads > 0, "search worker_threads must be positive");
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(worker_threads)
-            .thread_name(|index| format!("frankensteindb-search-{index}"))
-            .build()?;
         Ok(Self {
             pool,
             cache: Mutex::new(AggregationCache::new(options.aggregation_cache_entries)),
@@ -97,6 +90,30 @@ impl SearchRuntime {
             });
         }
     }
+}
+
+static SYSTEM_SEARCH_POOL: OnceLock<Arc<rayon::ThreadPool>> = OnceLock::new();
+
+pub(crate) fn system_search_pool() -> Result<Arc<rayon::ThreadPool>> {
+    if let Some(pool) = SYSTEM_SEARCH_POOL.get() {
+        return Ok(Arc::clone(pool));
+    }
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let candidate = build_search_pool(workers)?;
+    let _ = SYSTEM_SEARCH_POOL.set(Arc::clone(&candidate));
+    Ok(SYSTEM_SEARCH_POOL.get().cloned().unwrap_or(candidate))
+}
+
+fn build_search_pool(worker_threads: usize) -> Result<Arc<rayon::ThreadPool>> {
+    ensure!(worker_threads > 0, "search worker_threads must be positive");
+    Ok(Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(worker_threads)
+            .thread_name(|index| format!("frankensteindb-search-{index}"))
+            .build()?,
+    ))
 }
 
 struct AggregationCache {

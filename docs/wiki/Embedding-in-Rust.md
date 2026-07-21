@@ -152,7 +152,7 @@ clones.
 | `drop_table_named` | Drop table and derived index |
 | `change_table_schema` | Shadow-table migration and generation swap |
 | `reindex_table` | Rebuild Tantivy from SQLite |
-| `optimize_table` | Merge Tantivy segments |
+| `optimize_table_with_options` | Concurrently merge balanced groups to a target segment count |
 | `backup_to` | Create portable zstd backup |
 | `restore_backup` | Offline verified restore |
 | `ensure_row_etag` | Verify an optimistic-concurrency token inside the writer boundary |

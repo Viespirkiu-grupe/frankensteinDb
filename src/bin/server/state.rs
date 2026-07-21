@@ -94,7 +94,20 @@ impl AppState {
     where
         F: FnOnce(&mut Database, i64, Arc<JobStore>) -> anyhow::Result<Value> + Send + 'static,
     {
-        let job = self.jobs.create(kind, table)?;
+        self.start_job_with_input(kind, table, None, task)
+    }
+
+    pub(crate) fn start_job_with_input<F>(
+        &self,
+        kind: &str,
+        table: Option<String>,
+        input: Option<Value>,
+        task: F,
+    ) -> anyhow::Result<Job>
+    where
+        F: FnOnce(&mut Database, i64, Arc<JobStore>) -> anyhow::Result<Value> + Send + 'static,
+    {
+        let job = self.jobs.create_with_input(kind, table, input)?;
         let state = self.clone();
         let job_id = job.id;
         tokio::spawn(async move {

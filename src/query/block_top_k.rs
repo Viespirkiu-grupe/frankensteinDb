@@ -1,7 +1,10 @@
+use rayon::prelude::*;
 use tantivy::collector::{Collector, SegmentCollector};
+use tantivy::query::EnableScoring;
 use tantivy::{COLLECT_BLOCK_BUFFER_LEN, SegmentOrdinal};
 
 use super::*;
+use crate::segment_ranges::{collect_matching_docs_in_range, segment_doc_ranges};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BlockSortKey {
@@ -21,17 +24,53 @@ pub(super) fn collect_block_top_k(
     sort: &NativeSort,
     limit: usize,
     offset: usize,
+    pool: &rayon::ThreadPool,
 ) -> Result<Vec<(f32, DocAddress)>> {
     let collector = BlockTopKCollector {
         fields: sort.fields.clone(),
         top_n: limit.saturating_add(offset),
         offset,
     };
-    Ok(searcher
-        .search(query, &collector)?
+    let addresses =
+        if let Some(addresses) = collect_intra_segment(searcher, query, &collector, pool)? {
+            addresses
+        } else {
+            searcher.search(query, &collector)?
+        };
+    Ok(addresses
         .into_iter()
         .map(|address| (0.0, address))
         .collect())
+}
+
+fn collect_intra_segment(
+    searcher: &Searcher,
+    query: &dyn Query,
+    collector: &BlockTopKCollector,
+    pool: &rayon::ThreadPool,
+) -> Result<Option<Vec<DocAddress>>> {
+    let [reader] = searcher.segment_readers() else {
+        return Ok(None);
+    };
+    let ranges = segment_doc_ranges(reader.max_doc(), pool.current_num_threads());
+    if ranges.len() < 2 {
+        return Ok(None);
+    }
+    let weight = query.weight(EnableScoring::disabled_from_searcher(searcher))?;
+    let results = pool.install(|| {
+        ranges
+            .into_par_iter()
+            .map(|range| -> Result<_> {
+                let mut child = collector.for_segment(0, reader)?;
+                collect_matching_docs_in_range(&*weight, reader, range, |docs| {
+                    child.collect_block(docs);
+                })?;
+                Ok(child.harvest())
+            })
+            .collect::<Vec<_>>()
+    });
+    let fruits = results.into_iter().collect::<Result<Vec<_>>>()?;
+    Ok(Some(collector.merge_fruits(fruits)?))
 }
 
 struct BlockTopKCollector {

@@ -290,6 +290,71 @@ fn scalar_sort_uses_block_top_k_and_applies_offset_after_global_merge() {
 }
 
 #[test]
+fn intra_segment_ranges_match_single_worker_block_top_k() {
+    let (_directory, mut database) = database();
+    database
+        .create_table_def(TableDef {
+            name: "range_sort".into(),
+            aliases: vec![],
+            document_store: Default::default(),
+            columns: vec![
+                test_column("id", ColumnType::Integer, true, false, None),
+                test_column("value", ColumnType::Integer, false, false, None),
+            ],
+        })
+        .unwrap();
+    let rows = (0..350)
+        .map(|id| vec![json!(id), json!((id * 47) % 101)])
+        .collect::<Vec<_>>();
+    database.bulk_insert_json("range_sort", &rows).unwrap();
+    database
+        .optimize_table_with_options(
+            "range_sort",
+            OptimizeOptions {
+                target_segments: 1,
+                merge_threads: 1,
+            },
+        )
+        .unwrap();
+    let mut request = read(
+        "range_sort",
+        columns(&["id", "value"]),
+        Some(Filter::Compare {
+            column: "id".into(),
+            operator: Comparison::GreaterOrEqual,
+            value: json!(31),
+        }),
+        vec![Sort {
+            column: "value".into(),
+            json_path: None,
+            json_type: None,
+            descending: true,
+            geo_distance_from: None,
+            geo_distance_mode: GeoDistanceMode::Min,
+        }],
+    );
+    request.limit = 23;
+    request.offset = 11;
+    let options = |worker_threads| SearchOptions {
+        worker_threads,
+        aggregation_cache_entries: 0,
+        warmup_fast_fields: false,
+    };
+    let serial = database
+        .search_service_with_options(options(1))
+        .unwrap()
+        .read(request.clone())
+        .unwrap();
+    let parallel_search = database.search_service_with_options(options(4)).unwrap();
+    let parallel = parallel_search.read(request.clone()).unwrap();
+    assert_eq!(parallel.rows, serial.rows);
+    assert_eq!(parallel.next_search_after, serial.next_search_after);
+    let profile = parallel_search.profile(request).unwrap();
+    assert_eq!(profile["sort_strategy"], json!("intra_segment_ranges"));
+    assert_eq!(profile["sort_workers"], json!(4));
+}
+
+#[test]
 fn typed_native_aggregations_cover_metrics_and_groups() {
     let (_directory, mut database) = database();
     products(&mut database);

@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use frankensteindb::{QueryResult, SchemaChange, TableDef};
+use frankensteindb::{OptimizeOptions, QueryResult, SchemaChange, TableDef};
 
 use crate::aggregation_api;
 use crate::api_rows;
@@ -185,12 +185,21 @@ async fn reindex(
 async fn optimize(
     State(state): State<AppState>,
     Path(table): Path<String>,
+    body: Option<Json<OptimizeOptions>>,
 ) -> WebResult<(StatusCode, Json<DataResponse<crate::jobs::Job>>)> {
+    let options = body.map(|Json(options)| options).unwrap_or_default();
+    let input = serde_json::json!(options);
     let job = state
-        .start_job("optimize", Some(table.clone()), move |database, _, _| {
-            let result = database.optimize_table(&table)?;
-            Ok(serde_json::json!({"message": result.message}))
-        })
+        .start_job_with_input(
+            "optimize",
+            Some(table.clone()),
+            Some(input),
+            move |database, _, _| {
+                Ok(serde_json::to_value(
+                    database.optimize_table_with_options(&table, options)?,
+                )?)
+            },
+        )
         .map_err(WebError::from)?;
     Ok((StatusCode::ACCEPTED, Json(DataResponse::new(job))))
 }

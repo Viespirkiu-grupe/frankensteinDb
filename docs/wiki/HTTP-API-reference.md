@@ -113,7 +113,7 @@ gzip, and zstd.
 | --- | --- | --- |
 | `POST` | `/api/v1/tables/{table}/schema-changes` | Start shadow-table migration |
 | `POST` | `/api/v1/tables/{table}/reindex` | Rebuild Tantivy from SQLite |
-| `POST` | `/api/v1/tables/{table}/optimize` | Merge Tantivy segments |
+| `POST` | `/api/v1/tables/{table}/optimize` | Merge to `target_segments` (default 8) with configurable concurrency |
 | `POST` | `/api/v1/backups` | Create portable backup artifact |
 | `GET` | `/api/v1/jobs` | List jobs |
 | `GET` | `/api/v1/jobs/{id}` | Get a job |

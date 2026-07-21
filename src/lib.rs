@@ -18,6 +18,7 @@ use tantivy::collector::{
 use tantivy::columnar::{
     BytesColumn, Column, ColumnType as DynamicColumnType, MonotonicallyMappableToU64, StrColumn,
 };
+use tantivy::indexer::IndexWriterOptions;
 use tantivy::merge_policy::LogMergePolicy;
 use tantivy::query::{
     AllQuery, BooleanQuery, BoostQuery, ConstScoreQuery, DisjunctionMaxQuery, ExistsQuery,
@@ -115,6 +116,49 @@ pub struct SearchOptions {
     pub warmup_fast_fields: bool,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+/// Controls explicit segment optimization.
+pub struct OptimizeOptions {
+    /// Number of searchable segments to retain. Defaults to eight.
+    #[serde(default = "default_target_segments")]
+    pub target_segments: usize,
+    /// Concurrent Tantivy merge operations. Zero selects up to four available CPUs.
+    #[serde(default)]
+    pub merge_threads: usize,
+}
+
+impl Default for OptimizeOptions {
+    fn default() -> Self {
+        Self {
+            target_segments: default_target_segments(),
+            merge_threads: 0,
+        }
+    }
+}
+
+const fn default_target_segments() -> usize {
+    8
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+/// Outcome and timing of one explicit segment optimization.
+pub struct OptimizeResult {
+    /// Canonical table name that was optimized.
+    pub table: String,
+    /// Searchable segment count before optimization.
+    pub segments_before: usize,
+    /// Searchable segment count after all scheduled merges completed.
+    pub segments_after: usize,
+    /// Requested maximum number of retained segments.
+    pub target_segments: usize,
+    /// Tantivy merge worker count used by this operation.
+    pub merge_threads: usize,
+    /// Number of independent merge jobs scheduled.
+    pub merge_operations: usize,
+    /// End-to-end optimization time in milliseconds.
+    pub duration_ms: f64,
+}
+
 impl Default for SearchOptions {
     fn default() -> Self {
         Self {
@@ -194,6 +238,7 @@ mod database_schema;
 mod document_store;
 mod search_diagnostics;
 mod search_runtime;
+mod segment_ranges;
 mod similar;
 pub use similar::MoreLikeThisOptions;
 mod search_service;
@@ -203,8 +248,20 @@ struct QueryPlan {
 }
 
 fn new_index_writer(index: &Index, options: &DatabaseOptions) -> Result<IndexWriter> {
-    let writer =
-        index.writer_with_num_threads(options.writer_threads, options.writer_memory_bytes)?;
+    new_index_writer_with_merge_threads(index, options, 4)
+}
+
+fn new_index_writer_with_merge_threads(
+    index: &Index,
+    options: &DatabaseOptions,
+    merge_threads: usize,
+) -> Result<IndexWriter> {
+    let writer_options = IndexWriterOptions::builder()
+        .num_worker_threads(options.writer_threads)
+        .memory_budget_per_thread(options.writer_memory_bytes / options.writer_threads)
+        .num_merge_threads(merge_threads)
+        .build();
+    let writer = index.writer_with_options(writer_options)?;
     let mut merge_policy = LogMergePolicy::default();
     merge_policy.set_min_num_segments(options.min_merge_segments);
     merge_policy.set_del_docs_ratio_before_merge(options.deleted_docs_merge_ratio);

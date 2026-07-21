@@ -407,6 +407,17 @@ GET    /api/v1/jobs/{id}/artifact
 Job states survive restart. Jobs active during a crash become `interrupted`. Reindex, optimize, and
 backup can be retried without resubmitting input; consumed import/schema input must be resubmitted.
 
+Optimize accepts an optional JSON body:
+
+```json
+{"target_segments":8,"merge_threads":0}
+```
+
+It balances existing segments into at most `target_segments` disjoint groups and submits those
+merges concurrently. `merge_threads: 0` uses up to four system-provided CPUs. Use
+`target_segments: 1` for the previous full force-merge behavior. Optimization does not reindex or
+split a table that already has fewer segments than requested.
+
 ## Backup and offline restore
 
 `POST /api/v1/backups` creates a `.tar.zst` job artifact containing checkpointed SQLite, published

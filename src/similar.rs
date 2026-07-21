@@ -61,7 +61,7 @@ impl SearchService {
         validate_options(&options)?;
         let handle = self.handle(table)?;
         let fields = similarity_columns(&handle.def, &options.fields)?;
-        let seed = load_seed(&handle, key.clone(), &fields)?;
+        let seed = load_seed(&handle, key.clone(), &fields, &self.runtime.pool)?;
         let document_fields = similarity_values(&handle.index, &fields, &seed)?;
         let query = similarity_query(&handle, key, &options, document_fields)?;
         let searcher = handle.reader.searcher();
@@ -179,7 +179,12 @@ fn supports_similarity(data_type: ColumnType) -> bool {
     )
 }
 
-fn load_seed(handle: &SearchHandle, key: Value, fields: &[&ColumnDef]) -> Result<Vec<Value>> {
+fn load_seed(
+    handle: &SearchHandle,
+    key: Value,
+    fields: &[&ColumnDef],
+    pool: &rayon::ThreadPool,
+) -> Result<Vec<Value>> {
     let primary_key = &handle.def.columns[primary_key_index(&handle.def)];
     let request = ReadRequest {
         table: handle.def.name.clone(),
@@ -202,7 +207,7 @@ fn load_seed(handle: &SearchHandle, key: Value, fields: &[&ColumnDef]) -> Result
         search_after: None,
         min_score: None,
     };
-    execute_typed_read(&handle.def, &handle.index, &handle.reader, request)?
+    execute_typed_read(&handle.def, &handle.index, &handle.reader, request, pool)?
         .rows
         .into_iter()
         .next()

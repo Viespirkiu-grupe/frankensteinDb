@@ -111,9 +111,10 @@ pub(crate) fn collect_native_sorted_docs(
     sort: &NativeSort,
     limit: usize,
     offset: usize,
+    pool: &rayon::ThreadPool,
 ) -> Result<Vec<(f32, DocAddress)>> {
     if block_top_k_supported(sort) {
-        return collect_block_top_k(searcher, query, sort, limit, offset);
+        return collect_block_top_k(searcher, query, sort, limit, offset, pool);
     }
     let collector = TopDocs::with_limit(limit)
         .and_offset(offset)

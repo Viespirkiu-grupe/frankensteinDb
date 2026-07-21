@@ -7,7 +7,8 @@ impl Database {
         let def = self.table(&request.table)?;
         let index = self.index_handle(&def)?.index.clone();
         let reader = self.index_handle(&def)?.reader.clone();
-        execute_typed_read(&def, &index, &reader, request)
+        let pool = crate::search_runtime::system_search_pool()?;
+        execute_typed_read(&def, &index, &reader, request, &pool)
     }
 
     /// Describes the Tantivy collector and typed read plan without executing the search.
@@ -70,6 +71,7 @@ pub(crate) fn execute_typed_read(
     index: &Index,
     reader: &IndexReader,
     request: ReadRequest,
+    pool: &rayon::ThreadPool,
 ) -> Result<QueryResult> {
     let fields = schema_fields(&index.schema(), def)?;
     let searcher = reader.searcher();
@@ -99,6 +101,7 @@ pub(crate) fn execute_typed_read(
         full_scan,
         collection_limit,
         request.offset,
+        pool,
     )?;
     if let Some(min_score) = request.min_score {
         ensure!(min_score.is_finite(), "min_score must be finite");
@@ -219,6 +222,7 @@ fn collect_typed_docs(
     full_scan: bool,
     limit: usize,
     offset: usize,
+    pool: &rayon::ThreadPool,
 ) -> Result<Vec<(f32, DocAddress)>> {
     if full_scan {
         let count = searcher.search(query, &Count)?;
@@ -232,7 +236,7 @@ fn collect_typed_docs(
         return Ok(Vec::new());
     }
     if let Some(sort) = native_sort {
-        return collect_native_sorted_docs(searcher, query, sort, limit, offset);
+        return collect_native_sorted_docs(searcher, query, sort, limit, offset, pool);
     }
     Ok(searcher.search(
         query,

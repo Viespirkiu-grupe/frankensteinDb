@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use frankensteindb::{Database, Mutation, ReadRequest, TableDef};
+use frankensteindb::{Database, Mutation, OptimizeOptions, ReadRequest, TableDef};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
@@ -38,7 +38,15 @@ enum Command {
     /// Rebuild a Tantivy index from SQLite.
     Reindex { table: String },
     /// Merge a table's searchable segments.
-    Optimize { table: String },
+    Optimize {
+        table: String,
+        /// Maximum number of searchable segments to retain.
+        #[arg(long, default_value_t = 8)]
+        target_segments: usize,
+        /// Concurrent merge workers; zero selects up to four available CPUs.
+        #[arg(long, default_value_t = 0)]
+        merge_threads: usize,
+    },
     /// Restore a portable backup. The server must be stopped.
     Restore {
         archive: PathBuf,
@@ -80,7 +88,17 @@ fn main() -> Result<()> {
         Command::Tables => print_json(&database.tables()?)?,
         Command::Drop { table } => print_json(&database.drop_table_named(&table)?)?,
         Command::Reindex { table } => print_json(&database.reindex_table(&table)?)?,
-        Command::Optimize { table } => print_json(&database.optimize_table(&table)?)?,
+        Command::Optimize {
+            table,
+            target_segments,
+            merge_threads,
+        } => print_json(&database.optimize_table_with_options(
+            &table,
+            OptimizeOptions {
+                target_segments,
+                merge_threads,
+            },
+        )?)?,
         Command::Restore { .. } => unreachable!(),
     }
     Ok(())

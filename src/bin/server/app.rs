@@ -408,6 +408,44 @@ mod tests {
         assert_eq!(body["data"]["categories"]["buckets"][0]["doc_count"], 2);
     }
 
+    #[tokio::test]
+    async fn optimize_job_records_target_and_merge_concurrency() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = router(AppState::open(directory.path(), None, None).unwrap());
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/tables/items/optimize",
+                serde_json::json!({"target_segments":3,"merge_threads":2}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["data"]["input"]["target_segments"], 3);
+        assert_eq!(body["data"]["input"]["merge_threads"], 2);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tables/items/optimize")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["data"]["input"]["target_segments"], 8);
+        assert_eq!(body["data"]["input"]["merge_threads"], 0);
+    }
+
     fn json_request(method: &str, uri: &str, value: Value) -> Request<Body> {
         Request::builder()
             .method(method)

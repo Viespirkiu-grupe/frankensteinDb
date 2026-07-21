@@ -335,3 +335,120 @@ fn aggregation_cache_is_invalidated_when_a_new_generation_is_published() {
         .unwrap();
     assert_eq!(profile["search_worker_threads"], json!(2));
 }
+
+#[test]
+fn intra_segment_ranges_match_single_worker_aggregation_results() {
+    let (_directory, mut database) = database();
+    database
+        .create_table_def(TableDef {
+            name: "range_aggs".into(),
+            aliases: vec![],
+            document_store: Default::default(),
+            columns: vec![
+                test_column("id", ColumnType::Integer, true, false, None),
+                test_column("value", ColumnType::Integer, false, false, None),
+                test_column("kind", ColumnType::Text, false, false, Some(Analyzer::Raw)),
+            ],
+        })
+        .unwrap();
+    let rows = (0..350)
+        .map(|id| vec![json!(id), json!(id % 17), json!(format!("kind-{}", id % 5))])
+        .collect::<Vec<_>>();
+    database.bulk_insert_json("range_aggs", &rows).unwrap();
+    database
+        .optimize_table_with_options(
+            "range_aggs",
+            OptimizeOptions {
+                target_segments: 1,
+                merge_threads: 1,
+            },
+        )
+        .unwrap();
+    let latest = Aggregation::TopHits {
+        size: 3,
+        sort: vec![Sort {
+            column: "value".into(),
+            json_path: None,
+            json_type: None,
+            descending: true,
+            geo_distance_from: None,
+            geo_distance_mode: GeoDistanceMode::Min,
+        }],
+        columns: vec!["id".into(), "value".into()],
+    };
+    let aggregations = BTreeMap::from([
+        (
+            "kinds".into(),
+            Aggregation::Terms {
+                column: "kind".into(),
+                size: 10,
+                segment_size: Some(20),
+                min_doc_count: Some(1),
+                missing: None,
+                order: None,
+                aggregations: BTreeMap::from([("latest".into(), latest)]),
+            },
+        ),
+        (
+            "values".into(),
+            Aggregation::Range {
+                column: "value".into(),
+                ranges: vec![
+                    AggregationRange {
+                        key: Some("low".into()),
+                        from: None,
+                        to: Some(json!(8)),
+                    },
+                    AggregationRange {
+                        key: Some("high".into()),
+                        from: Some(json!(8)),
+                        to: None,
+                    },
+                ],
+                keyed: true,
+                aggregations: BTreeMap::new(),
+            },
+        ),
+    ]);
+    let filter = Filter::Compare {
+        column: "id".into(),
+        operator: Comparison::GreaterOrEqual,
+        value: json!(37),
+    };
+    let options = |worker_threads| SearchOptions {
+        worker_threads,
+        aggregation_cache_entries: 0,
+        warmup_fast_fields: false,
+    };
+    let serial = database
+        .search_service_with_options(options(1))
+        .unwrap()
+        .aggregate("range_aggs", Some(&filter), aggregations.clone())
+        .unwrap();
+    let parallel_search = database.search_service_with_options(options(4)).unwrap();
+    let parallel = parallel_search
+        .aggregate("range_aggs", Some(&filter), aggregations.clone())
+        .unwrap();
+    assert_eq!(parallel, serial);
+    let profile = parallel_search
+        .profile_with_aggregations(
+            ReadRequest {
+                table: "range_aggs".into(),
+                projection: vec![],
+                filter: Some(filter),
+                group_by: vec![],
+                order_by: vec![],
+                limit: 0,
+                offset: 0,
+                search_after: None,
+                min_score: None,
+            },
+            aggregations,
+        )
+        .unwrap();
+    assert_eq!(
+        profile["aggregation_strategy"],
+        json!("intra_segment_ranges")
+    );
+    assert_eq!(profile["aggregation_workers"], json!(4));
+}

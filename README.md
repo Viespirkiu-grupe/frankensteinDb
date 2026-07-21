@@ -126,7 +126,9 @@ primary key is automatically appended as a stable tie-breaker.
 
 One- and two-column scalar sorts use a block collector: fast-field values are decoded for Tantivy's
 document blocks and reduced through a bounded buffered top-K. Other native sorts retain Tantivy's
-generic bounded `TopDocs` path.
+generic bounded `TopDocs` path. When a single segment contains at least 250,000 documents, scalar
+sorts split its `DocId` space across the shared search pool, retain a local top-K per range, and
+merge those bounded results globally.
 
 An empty projection returns all table columns. Explicit projections may contain columns, `_score`,
 or aggregate metrics. `Count`, `Sum`, `Average`, `Min`, and `Max` use Tantivy aggregation
@@ -145,6 +147,10 @@ variables: `--search-threads` (`FRANKENSTEINDB_SEARCH_THREADS`, zero means autom
 `--aggregation-cache-entries` (`FRANKENSTEINDB_AGGREGATION_CACHE_ENTRIES`), and
 `--warmup-fast-fields` (`FRANKENSTEINDB_WARMUP_FAST_FIELDS`). Diagnostic `/profile` requests bypass
 the aggregation cache so their timings continue to represent actual Tantivy work.
+Large single-segment aggregations use the same `DocId` range partitioning: every worker evaluates
+the full aggregation tree over a disjoint range, after which Tantivy merges the intermediate
+results. This avoids rescanning the entire segment once per top-level aggregation and does not
+require reindexing.
 
 ```rust
 use frankensteindb::{Filter, Projection, ReadRequest, Sort};
@@ -231,7 +237,8 @@ Main endpoints:
 - `POST /api/v1/mutations` with an atomic mutation array
 - `POST /api/v1/flush`
 - `POST /api/v1/tables/{table}/reindex`
-- `POST /api/v1/tables/{table}/optimize`
+- `POST /api/v1/tables/{table}/optimize` with optional `target_segments` (default `8`) and
+  `merge_threads` (`0` selects up to four available CPUs)
 - `POST /api/v1/tables/{table}/imports` for streaming identity/gzip/zstd NDJSON upserts
 - `POST /api/v1/tables/{table}/schema-changes`
 - `GET /api/v1/jobs` and `GET/DELETE /api/v1/jobs/{id}`

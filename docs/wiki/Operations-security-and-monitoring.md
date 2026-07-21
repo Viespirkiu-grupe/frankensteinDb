@@ -139,10 +139,18 @@ POST /api/v1/tables/{table}/reindex
 POST /api/v1/tables/{table}/optimize
 ```
 
+The optimize request body is optional. Defaults are:
+
+```json
+{"target_segments":8,"merge_threads":0}
+```
+
 - **Reindex** rebuilds derived Tantivy data from authoritative SQLite and atomically publishes the
   new generation.
-- **Optimize** asks Tantivy to merge searchable segments. It can improve some read workloads but
-  uses substantial temporary disk I/O and should not run after every write.
+- **Optimize** balances searchable segments into at most eight retained segments by default and
+  merges independent groups concurrently. `merge_threads: 0` selects up to four available CPUs;
+  set `target_segments: 1` for a full force merge. It does not reindex or split existing segments.
+  Merging uses substantial temporary disk I/O and should not run after every write.
 
 Existing reader snapshots remain usable while a new generation is built.
 
@@ -179,6 +187,7 @@ frankensteindb ./data mutate mutation.json --deferred
 frankensteindb ./data flush
 frankensteindb ./data reindex products
 frankensteindb ./data optimize products
+frankensteindb ./data optimize products --target-segments 1 --merge-threads 4
 frankensteindb ./data drop products
 ```
 

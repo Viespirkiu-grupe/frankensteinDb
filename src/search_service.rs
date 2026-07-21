@@ -63,7 +63,13 @@ impl SearchService {
     /// Executes a typed read using only the published Tantivy snapshot.
     pub fn read(&self, request: ReadRequest) -> Result<QueryResult> {
         let handle = self.handle(&request.table)?;
-        execute_typed_read(&handle.def, &handle.index, &handle.reader, request)
+        execute_typed_read(
+            &handle.def,
+            &handle.index,
+            &handle.reader,
+            request,
+            &self.runtime.pool,
+        )
     }
 
     /// Explains a typed read using only in-memory metadata and Tantivy schema information.

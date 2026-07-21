@@ -1,6 +1,7 @@
 use super::*;
 use crate::aggregation_api::standard_aggregation_worker_count;
 use crate::database_read::execute_typed_read;
+use crate::segment_ranges::segment_doc_ranges;
 
 impl SearchService {
     /// Executes a read and reports coarse compilation, matching, and materialization timings.
@@ -46,6 +47,25 @@ impl SearchService {
             standard_aggregation_count,
             &self.runtime.pool,
         );
+        let range_workers = searcher.segment_readers().first().map_or(1, |reader| {
+            segment_doc_ranges(reader.max_doc(), self.runtime.worker_threads())
+                .len()
+                .max(1)
+        });
+        let aggregation_strategy = if aggregation_count == 0 {
+            "none"
+        } else if standard_aggregation_count == 0 {
+            "geo"
+        } else if searcher.segment_readers().len() == 1 && range_workers > 1 {
+            "intra_segment_ranges"
+        } else if aggregation_workers > 1 {
+            "top_level_aggregations"
+        } else {
+            "tantivy_segments"
+        };
+        let parallel_block_sort = native_sort.as_ref().is_some_and(block_top_k_supported)
+            && searcher.segment_readers().len() == 1
+            && range_workers > 1;
         if !aggregations.is_empty() {
             self.aggregate_uncached(&request.table, request.filter.as_ref(), aggregations)?;
         }
@@ -54,9 +74,15 @@ impl SearchService {
         let returned_rows = if request.limit == 0 {
             0
         } else {
-            execute_typed_read(&handle.def, &handle.index, &handle.reader, request)?
-                .rows
-                .len()
+            execute_typed_read(
+                &handle.def,
+                &handle.index,
+                &handle.reader,
+                request,
+                &self.runtime.pool,
+            )?
+            .rows
+            .len()
         };
         let execute_ms = execute_started.elapsed().as_secs_f64() * 1_000.0;
         Ok(json!({
@@ -65,7 +91,16 @@ impl SearchService {
             "returned_rows": returned_rows,
             "profiled_aggregations": aggregation_count,
             "aggregation_workers": aggregation_workers,
+            "aggregation_strategy": aggregation_strategy,
             "search_worker_threads": self.runtime.worker_threads(),
+            "sort_workers": if parallel_block_sort { range_workers } else { 1 },
+            "sort_strategy": if parallel_block_sort {
+                "intra_segment_ranges"
+            } else if native_sort.as_ref().is_some_and(block_top_k_supported) {
+                "block_top_k"
+            } else {
+                "tantivy"
+            },
             "aggregation_cache_bypassed": true,
             "segments": searcher.segment_readers().len(),
             "timing_ms": {

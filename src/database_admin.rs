@@ -1,5 +1,7 @@
 use super::*;
 
+mod optimize;
+
 impl Database {
     /// Creates a SQLite table and its corresponding Tantivy index from typed metadata.
     pub fn create_table_def(&mut self, def: TableDef) -> Result<QueryResult> {
@@ -61,32 +63,6 @@ impl Database {
         let count = self.rebuild_table(&name)?;
         Ok(QueryResult::message(format!(
             "reindexed {count} row(s) from {name}"
-        )))
-    }
-
-    /// Forces all searchable Tantivy segments for a table into one segment.
-    pub fn optimize_table(&mut self, name: &str) -> Result<QueryResult> {
-        self.flush()?;
-        let def = self.table(name)?;
-        let options = self.options.clone();
-        let handle = self.index_handle_mut(&def)?;
-        let old_writer = handle.writer.take().expect("initialized index writer");
-        old_writer.wait_merging_threads()?;
-        handle.writer = Some(new_index_writer(&handle.index, &options)?);
-        let segment_ids = handle.index.searchable_segment_ids()?;
-        let before = segment_ids.len();
-        if before > 1 {
-            handle
-                .writer
-                .as_mut()
-                .expect("initialized index writer")
-                .merge(&segment_ids)
-                .wait()?;
-            handle.reader.reload()?;
-        }
-        Ok(QueryResult::message(format!(
-            "optimized {} segment(s) in {}",
-            before, def.name
         )))
     }
 

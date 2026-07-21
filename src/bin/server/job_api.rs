@@ -9,6 +9,7 @@ use crate::api_types::DataResponse;
 use crate::jobs::AuditRecord;
 use crate::jobs::Job;
 use crate::state::{AppState, WebError, WebResult};
+use frankensteindb::OptimizeOptions;
 
 pub(crate) async fn list(State(state): State<AppState>) -> WebResult<Json<DataResponse<Vec<Job>>>> {
     Ok(Json(DataResponse::new(
@@ -108,8 +109,18 @@ pub(crate) async fn retry(
             let name = table
                 .clone()
                 .ok_or_else(|| WebError::bad_request("optimize job has no table"))?;
-            state.start_job("optimize", table, move |database, _, _| {
-                Ok(serde_json::json!({"message": database.optimize_table(&name)?.message}))
+            let options = original
+                .input
+                .clone()
+                .map(serde_json::from_value::<OptimizeOptions>)
+                .transpose()
+                .map_err(|error| WebError::bad_request(error.to_string()))?
+                .unwrap_or_default();
+            let input = serde_json::json!(options);
+            state.start_job_with_input("optimize", table, Some(input), move |database, _, _| {
+                Ok(serde_json::to_value(
+                    database.optimize_table_with_options(&name, options)?,
+                )?)
             })
         }
         "backup" => state.start_job("backup", None, move |database, id, jobs| {

@@ -127,15 +127,33 @@ pub(crate) struct DynamicSortComparator {
     orders: Vec<ComparatorEnum>,
 }
 
-impl Comparator<Vec<OwnedValue>> for DynamicSortComparator {
-    fn compare(&self, left: &Vec<OwnedValue>, right: &Vec<OwnedValue>) -> std::cmp::Ordering {
-        compare_sort_keys(&self.orders, left, right)
-    }
+#[derive(Clone, Debug)]
+pub(crate) enum DynamicSortKey<T> {
+    One(T),
+    Two(T, T),
+    Many(Vec<T>),
 }
 
-impl Comparator<Vec<Option<u64>>> for DynamicSortComparator {
-    fn compare(&self, left: &Vec<Option<u64>>, right: &Vec<Option<u64>>) -> std::cmp::Ordering {
-        compare_sort_keys(&self.orders, left, right)
+impl<T> Comparator<DynamicSortKey<T>> for DynamicSortComparator
+where
+    T: std::fmt::Debug + Send + Sync,
+    ComparatorEnum: Comparator<T>,
+{
+    fn compare(&self, left: &DynamicSortKey<T>, right: &DynamicSortKey<T>) -> std::cmp::Ordering {
+        match (left, right) {
+            (DynamicSortKey::One(left), DynamicSortKey::One(right)) => {
+                Comparator::compare(&self.orders[0], left, right)
+            }
+            (
+                DynamicSortKey::Two(left_first, left_second),
+                DynamicSortKey::Two(right_first, right_second),
+            ) => Comparator::compare(&self.orders[0], left_first, right_first)
+                .then_with(|| Comparator::compare(&self.orders[1], left_second, right_second)),
+            (DynamicSortKey::Many(left), DynamicSortKey::Many(right)) => {
+                compare_sort_keys(&self.orders, left, right)
+            }
+            _ => unreachable!("sort keys from one collector have the same shape"),
+        }
     }
 }
 
@@ -175,7 +193,7 @@ impl DynamicSortKeyComputer {
 }
 
 impl SortKeyComputer for DynamicSortKeyComputer {
-    type SortKey = Vec<OwnedValue>;
+    type SortKey = DynamicSortKey<OwnedValue>;
     type Child = DynamicSegmentSortKeyComputer;
     type Comparator = DynamicSortComparator;
 
@@ -259,8 +277,8 @@ pub(crate) struct DynamicSegmentSortKeyComputer {
 }
 
 impl SegmentSortKeyComputer for DynamicSegmentSortKeyComputer {
-    type SortKey = Vec<OwnedValue>;
-    type SegmentSortKey = Vec<Option<u64>>;
+    type SortKey = DynamicSortKey<OwnedValue>;
+    type SegmentSortKey = DynamicSortKey<Option<u64>>;
     type SegmentComparator = DynamicSortComparator;
 
     fn segment_comparator(&self) -> Self::SegmentComparator {
@@ -268,17 +286,37 @@ impl SegmentSortKeyComputer for DynamicSegmentSortKeyComputer {
     }
 
     fn segment_sort_key(&mut self, doc: DocId, _score: Score) -> Self::SegmentSortKey {
-        self.readers
-            .iter()
-            .map(|reader| reader.segment_sort_value(doc))
-            .collect()
+        match self.readers.as_slice() {
+            [reader] => DynamicSortKey::One(reader.segment_sort_value(doc)),
+            [first, second] => DynamicSortKey::Two(
+                first.segment_sort_value(doc),
+                second.segment_sort_value(doc),
+            ),
+            readers => DynamicSortKey::Many(
+                readers
+                    .iter()
+                    .map(|reader| reader.segment_sort_value(doc))
+                    .collect(),
+            ),
+        }
     }
 
     fn convert_segment_sort_key(&self, key: Self::SegmentSortKey) -> Self::SortKey {
-        self.readers
-            .iter()
-            .zip(key)
-            .map(|(reader, value)| reader.global_sort_value(value))
-            .collect()
+        match key {
+            DynamicSortKey::One(value) => {
+                DynamicSortKey::One(self.readers[0].global_sort_value(value))
+            }
+            DynamicSortKey::Two(first, second) => DynamicSortKey::Two(
+                self.readers[0].global_sort_value(first),
+                self.readers[1].global_sort_value(second),
+            ),
+            DynamicSortKey::Many(values) => DynamicSortKey::Many(
+                self.readers
+                    .iter()
+                    .zip(values)
+                    .map(|(reader, value)| reader.global_sort_value(value))
+                    .collect(),
+            ),
+        }
     }
 }

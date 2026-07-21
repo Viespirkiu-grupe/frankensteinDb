@@ -118,31 +118,43 @@ pub(super) fn aggregation_filter_query(def: &TableDef, filter: &Filter) -> Resul
             operator,
             value,
         } => {
-            column(def, name)?;
-            comparison_query(name, *operator, value)
+            let column = column(def, name)?;
+            comparison_query(name, *operator, &typed_query_value(column, value)?)
         }
         Filter::Between {
             column: name,
             lower,
             upper,
         } => {
-            column(def, name)?;
-            between_query(name, lower, upper)
+            let column = column(def, name)?;
+            between_query(
+                name,
+                &typed_query_value(column, lower)?,
+                &typed_query_value(column, upper)?,
+            )
         }
         Filter::JsonCompare {
             column,
             path,
+            data_type,
             operator,
             value,
-            ..
-        } => comparison_query(&json_path_field(def, column, path)?, *operator, value),
+        } => comparison_query(
+            &json_path_field(def, column, path)?,
+            *operator,
+            &json_query_value(*data_type, value)?,
+        ),
         Filter::JsonBetween {
             column,
             path,
+            data_type,
             lower,
             upper,
-            ..
-        } => between_query(&json_path_field(def, column, path)?, lower, upper),
+        } => between_query(
+            &json_path_field(def, column, path)?,
+            &json_query_value(*data_type, lower)?,
+            &json_query_value(*data_type, upper)?,
+        ),
         Filter::JsonExists {
             column,
             path,
@@ -191,9 +203,8 @@ pub(super) fn aggregation_filter_query(def: &TableDef, filter: &Filter) -> Resul
     })
 }
 
-fn comparison_query(field: &str, operator: Comparison, value: &Value) -> String {
+fn comparison_query(field: &str, operator: Comparison, value: &str) -> String {
     let field = escape_query_name(field);
-    let value = escape_query_value(value);
     match operator {
         Comparison::Equal => format!("{field}:{value}"),
         Comparison::NotEqual => format!("NOT ({field}:{value})"),
@@ -204,13 +215,52 @@ fn comparison_query(field: &str, operator: Comparison, value: &Value) -> String 
     }
 }
 
-fn between_query(field: &str, lower: &Value, upper: &Value) -> String {
-    format!(
-        "{}:[{} TO {}]",
-        escape_query_name(field),
-        escape_query_value(lower),
-        escape_query_value(upper)
-    )
+fn between_query(field: &str, lower: &str, upper: &str) -> String {
+    format!("{}:[{} TO {}]", escape_query_name(field), lower, upper)
+}
+
+fn typed_query_value(column: &ColumnDef, value: &Value) -> Result<String> {
+    match column.data_type {
+        ColumnType::Date | ColumnType::DateArray => {
+            let date = chrono::NaiveDate::parse_from_str(
+                value
+                    .as_str()
+                    .context("DATE filter value must be a string")?,
+                "%Y-%m-%d",
+            )?;
+            Ok(date
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is valid")
+                .and_utc()
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        }
+        ColumnType::DateTime | ColumnType::DateTimeArray => Ok(ChronoDateTime::parse_from_rfc3339(
+            value
+                .as_str()
+                .context("DATETIME filter value must be a string")?,
+        )?
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        ColumnType::Timestamp | ColumnType::TimestampArray => Ok(parse_timestamp(
+            value
+                .as_str()
+                .context("TIMESTAMP filter value must be a string")?,
+        )?
+        .and_utc()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        _ => Ok(escape_query_value(value)),
+    }
+}
+
+fn json_query_value(data_type: JsonPathType, value: &Value) -> Result<String> {
+    if data_type != JsonPathType::DateTime {
+        return Ok(escape_query_value(value));
+    }
+    Ok(ChronoDateTime::parse_from_rfc3339(
+        value
+            .as_str()
+            .context("JSON datetime filter value must be an RFC 3339 string")?,
+    )?
+    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 fn join_filters(def: &TableDef, filters: &[Filter], separator: &str) -> Result<String> {

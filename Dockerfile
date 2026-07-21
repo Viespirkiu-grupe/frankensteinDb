@@ -4,13 +4,26 @@ FROM rust:1.88-alpine3.21 AS builder
 
 WORKDIR /build
 RUN apk add --no-cache musl-dev
+
 COPY Cargo.toml Cargo.lock ./
+RUN cargo fetch --locked
+
+# Compile dependencies in a source-independent layer. Subsequent source-only changes reuse these
+# release artifacts from the exported BuildKit cache and rebuild only FrankensteinDB itself.
+RUN mkdir -p src/bin \
+    && touch src/lib.rs \
+    && printf 'fn main() {}\n' > src/main.rs \
+    && printf 'fn main() {}\n' > src/bin/server.rs \
+    && cargo build --locked --release \
+      --bin frankensteindb \
+      --bin frankensteindb-server \
+    && cargo clean --release --package frankensteindb \
+    && rm -rf src
+
 COPY src ./src
 COPY docs/openapi.json ./docs/openapi.json
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/build/target,sharing=locked \
-    cargo build --locked --release \
+RUN cargo build --locked --release \
       --bin frankensteindb \
       --bin frankensteindb-server \
     && cp target/release/frankensteindb /tmp/frankensteindb \

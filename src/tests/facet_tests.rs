@@ -272,6 +272,66 @@ fn filter_aggregations_use_typed_prefix_in_and_null_queries() {
         )
         .unwrap();
     assert_eq!(profile["profiled_aggregations"], json!(4));
+    assert_eq!(profile["aggregation_cache_bypassed"], json!(true));
     assert!(profile["timing_ms"]["aggregations"].is_number());
     assert_eq!(profile["returned_rows"], json!(0));
+}
+
+#[test]
+fn aggregation_cache_is_invalidated_when_a_new_generation_is_published() {
+    let (_directory, mut database) = facet_database();
+    let search = database
+        .search_service_with_options(SearchOptions {
+            worker_threads: 2,
+            aggregation_cache_entries: 8,
+            warmup_fast_fields: false,
+        })
+        .unwrap();
+    let aggregations = BTreeMap::from([(
+        "matching".into(),
+        Aggregation::Filter {
+            filter: Filter::Compare {
+                column: "id".into(),
+                operator: Comparison::GreaterOrEqual,
+                value: json!(0),
+            },
+            aggregations: BTreeMap::new(),
+        },
+    )]);
+
+    let first = search
+        .aggregate("catalog", None, aggregations.clone())
+        .unwrap();
+    assert_eq!(first["matching"]["doc_count"], json!(4));
+    assert_eq!(
+        search
+            .aggregate("catalog", None, aggregations.clone())
+            .unwrap(),
+        first
+    );
+
+    database
+        .bulk_insert_json(
+            "catalog",
+            &[vec![json!(5), json!("/products/books"), json!("open")]],
+        )
+        .unwrap();
+    search.publish_catalog(database.tables().unwrap()).unwrap();
+    let second = search.aggregate("catalog", None, aggregations).unwrap();
+    assert_eq!(second["matching"]["doc_count"], json!(5));
+
+    let profile = search
+        .profile(ReadRequest {
+            table: "catalog".into(),
+            projection: vec![],
+            filter: None,
+            group_by: vec![],
+            order_by: vec![],
+            limit: 0,
+            offset: 0,
+            search_after: None,
+            min_score: None,
+        })
+        .unwrap();
+    assert_eq!(profile["search_worker_threads"], json!(2));
 }

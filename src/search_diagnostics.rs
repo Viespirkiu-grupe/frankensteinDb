@@ -41,10 +41,13 @@ impl SearchService {
             .values()
             .filter(|aggregation| !matches!(aggregation, Aggregation::GeoTileGrid { .. }))
             .count();
-        let aggregation_workers =
-            standard_aggregation_worker_count(&searcher, standard_aggregation_count);
+        let aggregation_workers = standard_aggregation_worker_count(
+            &searcher,
+            standard_aggregation_count,
+            &self.runtime.pool,
+        );
         if !aggregations.is_empty() {
-            self.aggregate(&request.table, request.filter.as_ref(), aggregations)?;
+            self.aggregate_uncached(&request.table, request.filter.as_ref(), aggregations)?;
         }
         let aggregation_ms = aggregation_started.elapsed().as_secs_f64() * 1_000.0;
         let execute_started = std::time::Instant::now();
@@ -62,6 +65,8 @@ impl SearchService {
             "returned_rows": returned_rows,
             "profiled_aggregations": aggregation_count,
             "aggregation_workers": aggregation_workers,
+            "search_worker_threads": self.runtime.worker_threads(),
+            "aggregation_cache_bypassed": true,
             "segments": searcher.segment_readers().len(),
             "timing_ms": {
                 "catalog_lookup": lookup_ms,

@@ -3,12 +3,22 @@ use crate::aggregation_api::{
     collect_intermediate, collect_standard_aggregations, compile_aggregations, merge_intermediates,
 };
 use crate::database_read::{execute_typed_read, explain_typed_read, explain_typed_score};
+use crate::search_runtime::AggregationCacheKey;
 
 impl SearchService {
     pub(crate) fn open(root: PathBuf, definitions: Vec<TableDef>) -> Result<Self> {
+        Self::open_with_options(root, definitions, SearchOptions::default())
+    }
+
+    pub(crate) fn open_with_options(
+        root: PathBuf,
+        definitions: Vec<TableDef>,
+        options: SearchOptions,
+    ) -> Result<Self> {
         let service = Self {
             root,
             tables: Arc::new(RwLock::new(HashMap::new())),
+            runtime: Arc::new(SearchRuntime::new(options)?),
         };
         service.publish_catalog(definitions)?;
         Ok(service)
@@ -82,6 +92,33 @@ impl SearchService {
         aggregations: BTreeMap<String, Aggregation>,
     ) -> Result<Value> {
         let handle = self.handle(table)?;
+        let cache_key =
+            AggregationCacheKey::new(&handle.def.name, handle.generation, filter, &aggregations)?;
+        if let Some(cached) = self.runtime.cached_aggregation(&cache_key) {
+            return Ok(cached);
+        }
+        let value = self.aggregate_uncached_for_handle(&handle, filter, aggregations)?;
+        self.runtime.cache_aggregation(cache_key, value.clone());
+        Ok(value)
+    }
+
+    /// Executes aggregations without the result cache so diagnostics measure actual engine work.
+    pub(crate) fn aggregate_uncached(
+        &self,
+        table: &str,
+        filter: Option<&Filter>,
+        aggregations: BTreeMap<String, Aggregation>,
+    ) -> Result<Value> {
+        let handle = self.handle(table)?;
+        self.aggregate_uncached_for_handle(&handle, filter, aggregations)
+    }
+
+    fn aggregate_uncached_for_handle(
+        &self,
+        handle: &SearchHandle,
+        filter: Option<&Filter>,
+        aggregations: BTreeMap<String, Aggregation>,
+    ) -> Result<Value> {
         let searcher = handle.reader.searcher();
         validate_filter_only_json_paths(&searcher, &handle.def, filter)?;
         validate_json_aggregation_paths(&searcher, &handle.def, &aggregations)?;
@@ -104,6 +141,7 @@ impl SearchService {
                 &handle.def,
                 &handle.index,
                 standard,
+                &self.runtime.pool,
             )?);
         }
         for (name, aggregation) in geo {
@@ -159,12 +197,24 @@ impl SearchService {
             .write()
             .map_err(|_| anyhow!("search catalog lock was poisoned"))?;
         let mut next = HashMap::with_capacity(definitions.len());
+        let mut warmups = Vec::new();
         for def in definitions {
             if let Some(existing) = current.remove(&def.name)
                 && serde_json::to_value(&existing.def)? == serde_json::to_value(&def)?
             {
+                let previous_segments = existing.reader.searcher().segment_readers().len();
                 existing.reader.reload()?;
-                next.insert(def.name.clone(), SearchHandle { def, ..existing });
+                let current_segments = existing.reader.searcher().segment_readers().len();
+                let handle = SearchHandle {
+                    def,
+                    generation: existing.generation.saturating_add(1),
+                    ..existing
+                };
+                self.runtime.invalidate_table(&handle.def.name);
+                if current_segments < previous_segments {
+                    warmups.push(handle.clone());
+                }
+                next.insert(handle.def.name.clone(), handle);
                 continue;
             }
             let index = Index::open_in_dir(self.root.join("indexes").join(&def.name))?;
@@ -173,9 +223,21 @@ impl SearchService {
                 .reader_builder()
                 .reload_policy(ReloadPolicy::Manual)
                 .try_into()?;
-            next.insert(def.name.clone(), SearchHandle { def, index, reader });
+            let handle = SearchHandle {
+                def,
+                index,
+                reader,
+                generation: 1,
+            };
+            self.runtime.invalidate_table(&handle.def.name);
+            warmups.push(handle.clone());
+            next.insert(handle.def.name.clone(), handle);
         }
         *current = next;
+        drop(current);
+        for handle in warmups {
+            self.runtime.schedule_warmup(handle);
+        }
         Ok(())
     }
 
@@ -201,5 +263,10 @@ impl Database {
     /// Creates a concurrent Tantivy-only read service for the current published catalog.
     pub fn search_service(&self) -> Result<SearchService> {
         SearchService::open(self.root.clone(), self.tables()?)
+    }
+
+    /// Creates a concurrent read service with explicit worker, cache, and warmup settings.
+    pub fn search_service_with_options(&self, options: SearchOptions) -> Result<SearchService> {
+        SearchService::open_with_options(self.root.clone(), self.tables()?, options)
     }
 }

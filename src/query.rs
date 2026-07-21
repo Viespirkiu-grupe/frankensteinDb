@@ -266,6 +266,7 @@ pub(super) fn geo_distance_value(
 
 mod advanced_text;
 mod aggregation;
+mod block_top_k;
 mod compiler;
 mod cursor;
 mod projection;
@@ -277,6 +278,7 @@ mod typed_values;
 
 pub(super) use advanced_text::*;
 pub(super) use aggregation::*;
+use block_top_k::collect_block_top_k;
 pub(super) use compiler::*;
 pub(super) use cursor::*;
 pub(super) use projection::*;

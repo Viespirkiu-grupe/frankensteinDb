@@ -137,6 +137,8 @@ pub(crate) fn explain_typed_read(
     compile_filter(index, def, &fields, effective_filter.as_ref())?;
     let collector = if aggregation {
         "aggregation"
+    } else if native_sort.as_ref().is_some_and(block_top_k_supported) {
+        "block_fast_field_top_docs"
     } else if native_sort.is_some() {
         "fast_field_top_docs"
     } else if typed_requires_full_scan(request, &order) {

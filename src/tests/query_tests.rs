@@ -251,9 +251,42 @@ fn nullable_sort_uses_bounded_top_docs_and_preserves_null_order() {
 
     request.order_by[0].descending = true;
     request.limit = 1;
-    let result = database.read(request).unwrap();
+    let result = database.read(request.clone()).unwrap();
     assert_eq!(result.rows, vec![vec![json!(1), Value::Null]]);
     assert_eq!(result.next_search_after, None);
+}
+
+#[test]
+fn scalar_sort_uses_block_top_k_and_applies_offset_after_global_merge() {
+    let (_directory, mut database) = database();
+    products(&mut database);
+    let mut request = read(
+        "products",
+        columns(&["id", "price"]),
+        None,
+        vec![Sort {
+            column: "price".into(),
+            json_path: None,
+            json_type: None,
+            descending: false,
+            geo_distance_from: None,
+            geo_distance_mode: GeoDistanceMode::Min,
+        }],
+    );
+    request.limit = 1;
+    request.offset = 1;
+
+    let plan = database.explain(&request).unwrap();
+    let collector = plan
+        .columns
+        .iter()
+        .position(|name| name == "collector")
+        .unwrap();
+    assert_eq!(plan.rows[0][collector], json!("block_fast_field_top_docs"));
+    assert_eq!(
+        database.read(request).unwrap().rows,
+        vec![vec![json!(3), json!(45.0)]]
+    );
 }
 
 #[test]

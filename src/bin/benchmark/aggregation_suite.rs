@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::*;
 
-const AGGREGATION_BENCHMARK_COUNT: usize = 11;
+const AGGREGATION_BENCHMARK_COUNT: usize = 13;
 
 pub(crate) const fn aggregation_benchmark_count() -> usize {
     AGGREGATION_BENCHMARK_COUNT
@@ -17,27 +17,74 @@ pub(crate) const fn aggregation_benchmark_count() -> usize {
 pub(crate) fn run_aggregation_benchmarks(
     database: &Database,
     iterations: usize,
+    search_threads: usize,
     progress: &ProgressReporter,
     first_index: usize,
     total: usize,
     mut capture: Option<&mut BenchmarkCapture>,
 ) -> Result<Vec<Measurement>> {
-    let search = database.search_service()?;
+    let uncached_search = database.search_service_with_options(SearchOptions {
+        worker_threads: search_threads,
+        aggregation_cache_entries: 0,
+        warmup_fast_fields: false,
+    })?;
     let cases = aggregation_cases();
-    debug_assert_eq!(cases.len() + 2, AGGREGATION_BENCHMARK_COUNT);
+    debug_assert_eq!(cases.len() + 4, AGGREGATION_BENCHMARK_COUNT);
     let mut measurements = Vec::with_capacity(AGGREGATION_BENCHMARK_COUNT);
     for (offset, case) in cases.into_iter().enumerate() {
         progress.benchmark_start(first_index + offset, total, case.name, iterations);
-        let measurement = measure_aggregation(&search, &case, iterations, capture.as_deref_mut())?;
+        let measurement =
+            measure_aggregation(&uncached_search, &case, iterations, capture.as_deref_mut())?;
         progress.benchmark_done(&measurement);
         measurements.push(measurement);
     }
 
+    let facet_bundle = AggregationCase {
+        name: "facet_bundle_uncached",
+        filter: None,
+        request: facet_bundle(),
+    };
+    let index = first_index + measurements.len();
+    progress.benchmark_start(index, total, facet_bundle.name, iterations);
+    let measurement = measure_aggregation(
+        &uncached_search,
+        &facet_bundle,
+        iterations,
+        capture.as_deref_mut(),
+    )?;
+    progress.benchmark_done(&measurement);
+    measurements.push(measurement);
+
+    let cached_search = database.search_service_with_options(SearchOptions {
+        worker_threads: search_threads,
+        aggregation_cache_entries: 8,
+        warmup_fast_fields: false,
+    })?;
+    let cached_bundle = AggregationCase {
+        name: "facet_bundle_cached",
+        filter: None,
+        request: facet_bundle.request.clone(),
+    };
+    let index = first_index + measurements.len();
+    progress.benchmark_start(index, total, cached_bundle.name, iterations);
+    let measurement = measure_aggregation(
+        &cached_search,
+        &cached_bundle,
+        iterations,
+        capture.as_deref_mut(),
+    )?;
+    progress.benchmark_done(&measurement);
+    measurements.push(measurement);
+
     let distributed = distributed_request();
     let index = first_index + measurements.len();
     progress.benchmark_start(index, total, "distributed_aggregation_collect", iterations);
-    let measurement =
-        measure_distributed_collect(&search, &distributed, iterations, capture.as_deref_mut())?;
+    let measurement = measure_distributed_collect(
+        &uncached_search,
+        &distributed,
+        iterations,
+        capture.as_deref_mut(),
+    )?;
     progress.benchmark_done(&measurement);
     measurements.push(measurement);
 
@@ -47,7 +94,8 @@ pub(crate) fn run_aggregation_benchmarks(
         "distributed_aggregation_merge",
         iterations,
     );
-    let measurement = measure_distributed_merge(&search, &distributed, iterations, capture)?;
+    let measurement =
+        measure_distributed_merge(&uncached_search, &distributed, iterations, capture)?;
     progress.benchmark_done(&measurement);
     measurements.push(measurement);
     Ok(measurements)
@@ -105,6 +153,69 @@ fn terms_order_missing() -> BTreeMap<String, Aggregation> {
             aggregations: BTreeMap::new(),
         },
     )])
+}
+
+fn facet_bundle() -> BTreeMap<String, Aggregation> {
+    let terms = |column: &str, size| Aggregation::Terms {
+        column: column.into(),
+        size,
+        segment_size: Some(size.saturating_mul(2)),
+        min_doc_count: Some(1),
+        missing: None,
+        order: Some(BucketOrder {
+            target: "_count".into(),
+            descending: true,
+        }),
+        aggregations: BTreeMap::new(),
+    };
+    BTreeMap::from([
+        ("types".into(), terms("tipas", 50)),
+        ("categories".into(), terms("kategorija", 50)),
+        (
+            "buyers".into(),
+            terms("perkanciosiosOrganizacijosKodas", 50),
+        ),
+        ("suppliers".into(), terms("tiekejuKodai", 50)),
+        ("cpv".into(), terms("bvpzKodai", 50)),
+        (
+            "value_ranges".into(),
+            Aggregation::Range {
+                column: "numatomaVerte".into(),
+                ranges: vec![
+                    AggregationRange {
+                        key: Some("small".into()),
+                        from: None,
+                        to: Some(json!(10_000)),
+                    },
+                    AggregationRange {
+                        key: Some("medium".into()),
+                        from: Some(json!(10_000)),
+                        to: Some(json!(100_000)),
+                    },
+                    AggregationRange {
+                        key: Some("large".into()),
+                        from: Some(json!(100_000)),
+                        to: None,
+                    },
+                ],
+                keyed: true,
+                aggregations: BTreeMap::new(),
+            },
+        ),
+        (
+            "contract_years".into(),
+            Aggregation::DateHistogram {
+                column: "sudarymoData".into(),
+                fixed_interval: "365d".into(),
+                offset: None,
+                min_doc_count: 1,
+                hard_bounds: None,
+                extended_bounds: None,
+                keyed: false,
+                aggregations: BTreeMap::new(),
+            },
+        ),
+    ])
 }
 
 fn bounded_keyed_histogram() -> BTreeMap<String, Aggregation> {

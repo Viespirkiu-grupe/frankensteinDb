@@ -1,4 +1,4 @@
-use std::thread;
+use rayon::prelude::*;
 
 use super::*;
 
@@ -10,44 +10,40 @@ pub(crate) fn collect_standard_aggregations(
     def: &TableDef,
     index: &Index,
     aggregations: BTreeMap<String, Aggregation>,
+    pool: &rayon::ThreadPool,
 ) -> Result<serde_json::Map<String, Value>> {
-    let worker_count = standard_aggregation_worker_count(searcher, aggregations.len());
+    let worker_count = standard_aggregation_worker_count(searcher, aggregations.len(), pool);
     if worker_count == 1 {
         return collect_group(searcher, query, def, index, aggregations, None);
     }
 
     let groups = partition_aggregations(aggregations, worker_count);
     let limits = AggregationLimitsGuard::new(Some(128 * 1024 * 1024), Some(10_000));
-    thread::scope(|scope| {
-        let handles = groups
-            .into_iter()
+    let results = pool.install(|| {
+        groups
+            .into_par_iter()
             .map(|group| {
                 let limits = limits.clone();
-                scope.spawn(move || collect_group(searcher, query, def, index, group, Some(limits)))
+                collect_group(searcher, query, def, index, group, Some(limits))
             })
-            .collect::<Vec<_>>();
-        let mut combined = serde_json::Map::new();
-        for handle in handles {
-            let result = handle
-                .join()
-                .map_err(|_| anyhow!("parallel aggregation worker panicked"))??;
-            combined.extend(result);
-        }
-        Ok(combined)
-    })
+            .collect::<Vec<_>>()
+    });
+    let mut combined = serde_json::Map::new();
+    for result in results {
+        combined.extend(result?);
+    }
+    Ok(combined)
 }
 
 pub(crate) fn standard_aggregation_worker_count(
     searcher: &Searcher,
     aggregation_count: usize,
+    pool: &rayon::ThreadPool,
 ) -> usize {
     if searcher.segment_readers().len() != 1 || aggregation_count < 2 {
         return 1;
     }
-    thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .min(aggregation_count)
+    pool.current_num_threads().min(aggregation_count)
 }
 
 fn partition_aggregations(

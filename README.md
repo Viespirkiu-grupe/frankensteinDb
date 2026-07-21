@@ -124,6 +124,10 @@ Explicit native sorts return `next_search_after` for keyset pagination. Supplyin
 request compiles a lexicographic Tantivy range boundary and avoids deep `offset` collection. The
 primary key is automatically appended as a stable tie-breaker.
 
+One- and two-column scalar sorts use a block collector: fast-field values are decoded for Tantivy's
+document blocks and reduced through a bounded buffered top-K. Other native sorts retain Tantivy's
+generic bounded `TopDocs` path.
+
 An empty projection returns all table columns. Explicit projections may contain columns, `_score`,
 or aggregate metrics. `Count`, `Sum`, `Average`, `Min`, and `Max` use Tantivy aggregation
 collectors. `Database::explain(&request)` returns the chosen Tantivy collector without executing the
@@ -131,6 +135,16 @@ read. `Database::explain_score(&request, &identity_filter)` returns Tantivy's re
 explanation for one hit. HTTP exposes it at
 `POST /api/v1/tables/{table}/rows/{key}/explain-score`. Highlight projections use Tantivy's actual
 field tokenizer and `SnippetGenerator`, returning escaped HTML with matched tokens inside `<b>`.
+
+`SearchService` shares one bounded CPU pool across aggregation work. By default its size is the
+parallelism available to the process. Completed aggregation trees are cached by table generation,
+filter, and request (128 entries by default), and sortable/aggregatable fast fields are warmed in
+the background when an index opens or segment compaction publishes a generation. Embedded users can
+override these through `SearchOptions`. The server exposes matching options and environment
+variables: `--search-threads` (`FRANKENSTEINDB_SEARCH_THREADS`, zero means automatic),
+`--aggregation-cache-entries` (`FRANKENSTEINDB_AGGREGATION_CACHE_ENTRIES`), and
+`--warmup-fast-fields` (`FRANKENSTEINDB_WARMUP_FAST_FIELDS`). Diagnostic `/profile` requests bypass
+the aggregation cache so their timings continue to represent actual Tantivy work.
 
 ```rust
 use frankensteindb::{Filter, Projection, ReadRequest, Sort};
@@ -268,6 +282,10 @@ cargo run --release --bin frankensteindb-benchmark -- \
 # Reuse the existing 5.8M-row database without importing again.
 cargo run --release --bin frankensteindb-benchmark -- --reuse --iterations 4
 
+# Pin the shared search/aggregation pool; zero (the default) uses available system parallelism.
+cargo run --release --bin frankensteindb-benchmark -- \
+  --reuse --iterations 4 --search-threads 8
+
 # Also save readable query examples, representative results, and timing summaries.
 cargo run --release --bin frankensteindb-benchmark -- --reuse --iterations 4 --save-results
 
@@ -282,7 +300,11 @@ wide results use a readable field/value table per row. The SQL is documentation 
 execution still uses typed requests and reads exclusively through Tantivy. The normal
 machine-readable JSON summary remains on stdout.
 
-The suite includes native reads and mutations plus recursive Tantivy aggregation cases: ordered
+The sort cases include unfiltered primary-key and edit-date pages and therefore exercise the block
+top-K collector without rebuilding the index. Aggregations include the complete seven-part contract
+facet bundle twice: `facet_bundle_uncached` measures Tantivy execution with the result cache
+disabled, while `facet_bundle_cached` measures repeated generation-scoped cache hits. The remaining
+suite includes native reads and mutations plus recursive Tantivy aggregation cases: ordered
 terms with missing values, bounded/keyed numeric and date histograms, keyed ranges, calendar
 composites with missing ordering, stats/percentiles/cardinality, metric-ordered nested buckets,
 filter buckets, top hits, and distributed intermediate collection/merge. JSON-path cases are not
@@ -294,6 +316,9 @@ New imports default to `--compression none` for maximum document-store write thr
 benchmark schema—which currently projects from fast fields and has no stored columns—should show
 little or no difference. With `--reuse`, these flags cannot rewrite the existing generation and the
 report shows its persisted settings.
+
+The runtime optimizations do not change the Tantivy schema, so an index created by the previous
+version can be benchmarked directly with `--reuse`; reindexing is unnecessary.
 
 `--sqlite-synchronous full|normal|off`, writer memory, batch size, flush rows, and worker counts are
 explicit benchmark controls. The benchmark is intentionally not run by repository verification.

@@ -112,6 +112,9 @@ pub(crate) fn collect_native_sorted_docs(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<(f32, DocAddress)>> {
+    if block_top_k_supported(sort) {
+        return collect_block_top_k(searcher, query, sort, limit, offset);
+    }
     let collector = TopDocs::with_limit(limit)
         .and_offset(offset)
         .order_by(DynamicSortKeyComputer::new(sort.fields.clone()));
@@ -120,6 +123,23 @@ pub(crate) fn collect_native_sorted_docs(
         .into_iter()
         .map(|(_, address)| (0.0, address))
         .collect())
+}
+
+pub(crate) fn block_top_k_supported(sort: &NativeSort) -> bool {
+    (1..=2).contains(&sort.fields.len())
+        && sort.fields.iter().all(|field| {
+            field.geo_distance_from.is_none()
+                && matches!(
+                    field.data_type,
+                    ColumnType::Integer
+                        | ColumnType::Unsigned
+                        | ColumnType::Real
+                        | ColumnType::Boolean
+                        | ColumnType::Date
+                        | ColumnType::DateTime
+                        | ColumnType::Timestamp
+                )
+        })
 }
 
 #[derive(Clone, Debug, Default)]

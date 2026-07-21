@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, ValueEnum};
 use frankensteindb::{
-    Database, DatabaseOptions, DocumentCompression, DocumentStore, SqliteSynchronous,
-    canonical_contract_row, canonical_contract_table,
+    Database, DatabaseOptions, DocumentCompression, DocumentStore, SearchOptions,
+    SqliteSynchronous, canonical_contract_row, canonical_contract_table,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -106,6 +106,10 @@ struct Args {
     #[arg(long, default_value_t = 2)]
     iterations: usize,
 
+    /// CPU workers shared by benchmarked searches. Zero uses available system parallelism.
+    #[arg(long, default_value_t = 0)]
+    search_threads: usize,
+
     /// Disable progress messages on stderr.
     #[arg(long)]
     no_progress: bool,
@@ -127,6 +131,7 @@ struct BenchmarkReport {
     import_threads: usize,
     index_threads: usize,
     index_memory_mib: usize,
+    search_threads: usize,
     sqlite_synchronous: BenchmarkSynchronous,
     document_store: DocumentStore,
     import_skipped: bool,
@@ -246,6 +251,7 @@ fn main() -> Result<()> {
         first_id,
         &first_row,
         args.iterations,
+        args.search_threads,
         &progress,
         capture.as_mut(),
     )?;
@@ -265,6 +271,7 @@ fn main() -> Result<()> {
         import_threads: args.import_threads,
         index_threads: args.index_threads,
         index_memory_mib: args.index_memory_mib,
+        search_threads: args.search_threads,
         sqlite_synchronous: args.sqlite_synchronous,
         document_store,
         import_skipped: args.skip_import,

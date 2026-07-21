@@ -73,6 +73,7 @@ pub use model::{
     TableDef, TextIndexRecord,
 };
 use model::{RowOperation, RowValue};
+use search_runtime::SearchRuntime;
 
 /// Embedded SQLite/Tantivy database. Writes are durable in SQLite; supported reads use Tantivy.
 pub struct Database {
@@ -92,6 +93,7 @@ pub struct Database {
 pub struct SearchService {
     root: PathBuf,
     tables: Arc<RwLock<HashMap<String, SearchHandle>>>,
+    runtime: Arc<SearchRuntime>,
 }
 
 #[derive(Clone)]
@@ -99,6 +101,28 @@ struct SearchHandle {
     def: TableDef,
     index: Index,
     reader: IndexReader,
+    generation: u64,
+}
+
+#[derive(Debug, Clone)]
+/// Runtime controls for concurrent searches, caching, and background fast-field warmup.
+pub struct SearchOptions {
+    /// Maximum CPU workers shared by all searches. Zero selects the system-provided parallelism.
+    pub worker_threads: usize,
+    /// Maximum completed aggregation responses retained in the in-memory LRU cache.
+    pub aggregation_cache_entries: usize,
+    /// Warm aggregation and sort fast fields after opening or compacting an index generation.
+    pub warmup_fast_fields: bool,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            worker_threads: 0,
+            aggregation_cache_entries: 128,
+            warmup_fast_fields: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +193,7 @@ mod aggregation_api;
 mod database_schema;
 mod document_store;
 mod search_diagnostics;
+mod search_runtime;
 mod similar;
 pub use similar::MoreLikeThisOptions;
 mod search_service;

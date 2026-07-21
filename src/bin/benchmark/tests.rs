@@ -51,11 +51,22 @@ mod tests {
             id,
             &loaded,
             1,
+            1,
             &ProgressReporter::new(false),
             Some(&mut capture),
         )
         .unwrap();
-        assert_eq!(measurements.len(), 37);
+        assert_eq!(measurements.len(), 39);
+        assert!(
+            measurements
+                .iter()
+                .any(|measurement| measurement.name == "facet_bundle_uncached")
+        );
+        assert!(
+            measurements
+                .iter()
+                .any(|measurement| measurement.name == "facet_bundle_cached")
+        );
         let capture_path = directory.path().join("results.txt");
         capture.save(&capture_path).unwrap();
         let captured = std::fs::read_to_string(capture_path).unwrap();
@@ -84,6 +95,7 @@ mod tests {
         let defaults = Args::try_parse_from(["benchmark"]).unwrap();
         assert_eq!(defaults.compression, BenchmarkCompression::None);
         assert_eq!(defaults.docstore_block_size, 16_384);
+        assert_eq!(defaults.search_threads, 0);
         assert!(defaults.docstore_compression_thread);
         assert_eq!(defaults.save_results, None);
 

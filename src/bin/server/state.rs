@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use frankensteindb::{Database, SearchService};
+use frankensteindb::{Database, SearchOptions, SearchService};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -24,14 +24,24 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
     pub(crate) fn open(
         path: impl AsRef<Path>,
         api_key: Option<String>,
         api_key_config: Option<std::path::PathBuf>,
     ) -> anyhow::Result<Self> {
+        Self::open_with_search_options(path, api_key, api_key_config, SearchOptions::default())
+    }
+
+    pub(crate) fn open_with_search_options(
+        path: impl AsRef<Path>,
+        api_key: Option<String>,
+        api_key_config: Option<std::path::PathBuf>,
+        search_options: SearchOptions,
+    ) -> anyhow::Result<Self> {
         let root = path.as_ref().to_path_buf();
         let database = Database::open(&root)?;
-        let search = database.search_service()?;
+        let search = database.search_service_with_options(search_options)?;
         Ok(Self {
             database: Arc::new(Mutex::new(database)),
             search,

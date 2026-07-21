@@ -10,6 +10,7 @@ pub(crate) fn run_benchmark_suite(
     first_id: i64,
     first_row: &[Value],
     iterations: usize,
+    search_threads: usize,
     progress: &ProgressReporter,
     mut capture: Option<&mut BenchmarkCapture>,
 ) -> Result<Vec<Measurement>> {
@@ -26,6 +27,7 @@ pub(crate) fn run_benchmark_suite(
     benchmarks.extend(run_aggregation_benchmarks(
         database,
         iterations,
+        search_threads,
         progress,
         benchmarks.len() + 1,
         benchmark_count,

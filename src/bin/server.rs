@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
+use frankensteindb::SearchOptions;
 
 #[path = "server/aggregation_api.rs"]
 mod aggregation_api;
@@ -52,12 +53,43 @@ struct Args {
     /// JSON file containing hashed API keys, scopes, validity windows, and table allowlists.
     #[arg(long, env = "FRANKENSTEINDB_API_KEY_CONFIG")]
     api_key_config: Option<PathBuf>,
+
+    /// CPU workers shared by searches and aggregations. Zero uses available system parallelism.
+    #[arg(long, env = "FRANKENSTEINDB_SEARCH_THREADS", default_value_t = 0)]
+    search_threads: usize,
+
+    /// Maximum completed aggregation responses kept in memory. Zero disables the cache.
+    #[arg(
+        long,
+        env = "FRANKENSTEINDB_AGGREGATION_CACHE_ENTRIES",
+        default_value_t = 128
+    )]
+    aggregation_cache_entries: usize,
+
+    /// Warm sortable and aggregatable fast fields after opening or compacting an index.
+    #[arg(
+        long,
+        env = "FRANKENSTEINDB_WARMUP_FAST_FIELDS",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    warmup_fast_fields: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let state = AppState::open(args.database, args.api_key, args.api_key_config)?;
+    let search_options = SearchOptions {
+        worker_threads: args.search_threads,
+        aggregation_cache_entries: args.aggregation_cache_entries,
+        warmup_fast_fields: args.warmup_fast_fields,
+    };
+    let state = AppState::open_with_search_options(
+        args.database,
+        args.api_key,
+        args.api_key_config,
+        search_options,
+    )?;
     #[cfg(unix)]
     tokio::spawn(reload_auth_on_sighup(state.clone()));
     let listener = tokio::net::TcpListener::bind(args.listen).await?;

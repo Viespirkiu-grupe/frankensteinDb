@@ -187,3 +187,7 @@ Mutation kinds are `insert`, `update`, and `delete`. Schema-change kinds are `ad
 The operational job kinds are import, schema change, reindex, optimize, and backup. Table aliases,
 facet collection, score explanation, query profiling, ETags, deferred visibility, audit, and auth
 reload are described in the task-oriented pages and listed in [HTTP API reference](HTTP-API-reference).
+
+Facet collection accepts `root`, `limit` (1–10,000), optional `filter`, and
+`exclude_own_filter`. When enabled, structural predicates on the requested facet column are removed
+from nested Boolean filter containers; predicates on other columns remain active.

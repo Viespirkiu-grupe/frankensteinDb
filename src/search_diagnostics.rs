@@ -52,6 +52,30 @@ impl SearchService {
         limit: usize,
         filter: Option<&Filter>,
     ) -> Result<Value> {
+        self.collect_facets(table, column_name, root, limit, filter, false)
+    }
+
+    /// Counts facet children after removing this facet column's structural predicates.
+    pub fn facets_excluding_own_filter(
+        &self,
+        table: &str,
+        column_name: &str,
+        root: &str,
+        limit: usize,
+        filter: Option<&Filter>,
+    ) -> Result<Value> {
+        self.collect_facets(table, column_name, root, limit, filter, true)
+    }
+
+    fn collect_facets(
+        &self,
+        table: &str,
+        column_name: &str,
+        root: &str,
+        limit: usize,
+        filter: Option<&Filter>,
+        exclude_own_filter: bool,
+    ) -> Result<Value> {
         ensure!(
             (1..=10_000).contains(&limit),
             "facet limit must be 1..=10000"
@@ -65,8 +89,19 @@ impl SearchService {
         ensure!(root.starts_with('/'), "facet root must start with '/'");
         let fields = schema_fields(&handle.index.schema(), &handle.def)?;
         let searcher = handle.reader.searcher();
-        validate_filter_only_json_paths(&searcher, &handle.def, filter)?;
-        let query = compile_filter(&handle.index, &handle.def, &fields, filter)?.query;
+        let effective_filter = if exclude_own_filter {
+            filter.and_then(|filter| filter_without_column(filter, column_name))
+        } else {
+            filter.cloned()
+        };
+        validate_filter_only_json_paths(&searcher, &handle.def, effective_filter.as_ref())?;
+        let query = compile_filter(
+            &handle.index,
+            &handle.def,
+            &fields,
+            effective_filter.as_ref(),
+        )?
+        .query;
         let mut collector = FacetCollector::for_field(&column.name);
         collector.add_facet(root);
         let counts = searcher.search(&*query, &collector)?;

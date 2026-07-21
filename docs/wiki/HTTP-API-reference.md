@@ -80,8 +80,12 @@ Filter-based writes accept `dry_run` and `max_rows` query parameters.
 Facet body:
 
 ```json
-{"root":"/catalog","limit":100,"filter":null}
+{"root":"/catalog","limit":100,"filter":null,"exclude_own_filter":false}
 ```
+
+With `exclude_own_filter:true`, the requested facet ignores its own structural filter clauses but
+keeps every other dimension's filter. This lets a selected facet continue showing viable
+alternatives and their counts. The default is `false` for backward compatibility.
 
 ## Aggregation distribution
 

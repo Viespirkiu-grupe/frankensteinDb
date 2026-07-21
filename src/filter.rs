@@ -142,6 +142,44 @@ pub enum Filter {
     },
 }
 
+/// Removes structural predicates on `column` and simplifies their Boolean containers.
+pub(crate) fn filter_without_column(filter: &Filter, column: &str) -> Option<Filter> {
+    if structural_column(filter).is_some_and(|name| name.eq_ignore_ascii_case(column)) {
+        return None;
+    }
+    match filter {
+        Filter::All { filters } => simplify_boolean(filters, column, true),
+        Filter::Any { filters } => simplify_boolean(filters, column, false),
+        Filter::Not { filter } => filter_without_column(filter, column).map(|filter| Filter::Not {
+            filter: Box::new(filter),
+        }),
+        _ => Some(filter.clone()),
+    }
+}
+
+fn structural_column(filter: &Filter) -> Option<&str> {
+    match filter {
+        Filter::Compare { column, .. }
+        | Filter::Between { column, .. }
+        | Filter::In { column, .. }
+        | Filter::IsNull { column, .. } => Some(column),
+        _ => None,
+    }
+}
+
+fn simplify_boolean(filters: &[Filter], column: &str, all: bool) -> Option<Filter> {
+    let mut filters = filters
+        .iter()
+        .filter_map(|filter| filter_without_column(filter, column))
+        .collect::<Vec<_>>();
+    match filters.len() {
+        0 => None,
+        1 => filters.pop(),
+        _ if all => Some(Filter::All { filters }),
+        _ => Some(Filter::Any { filters }),
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 /// Scalar comparison operators supported by typed filters.
@@ -164,4 +202,65 @@ const fn default_regex_max_expansions() -> u32 {
 
 const fn default_phrase_prefix_max_expansions() -> u32 {
     50
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn equals(column: &str, value: &str) -> Filter {
+        Filter::Compare {
+            column: column.into(),
+            operator: Comparison::Equal,
+            value: json!(value),
+        }
+    }
+
+    #[test]
+    fn removing_from_all_preserves_other_dimensions() {
+        let filter = Filter::All {
+            filters: vec![equals("category", "a"), equals("status", "open")],
+        };
+        assert_eq!(
+            filter_without_column(&filter, "CATEGORY"),
+            Some(equals("status", "open"))
+        );
+    }
+
+    #[test]
+    fn removing_from_any_preserves_other_dimensions() {
+        let filter = Filter::Any {
+            filters: vec![equals("category", "a"), equals("status", "open")],
+        };
+        assert_eq!(
+            filter_without_column(&filter, "category"),
+            Some(equals("status", "open"))
+        );
+    }
+
+    #[test]
+    fn removing_below_not_removes_the_empty_container() {
+        let filter = Filter::Not {
+            filter: Box::new(equals("category", "a")),
+        };
+        assert_eq!(filter_without_column(&filter, "category"), None);
+    }
+
+    #[test]
+    fn nested_empty_containers_are_removed() {
+        let filter = Filter::All {
+            filters: vec![
+                Filter::Not {
+                    filter: Box::new(equals("category", "a")),
+                },
+                equals("status", "open"),
+            ],
+        };
+        assert_eq!(
+            filter_without_column(&filter, "category"),
+            Some(equals("status", "open"))
+        );
+    }
 }

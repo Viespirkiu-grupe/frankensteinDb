@@ -48,6 +48,7 @@ mod canonical;
 pub use canonical::{canonical_contract_row, canonical_contract_table};
 
 mod filter;
+use filter::filter_without_column;
 pub use filter::{Comparison, Filter};
 
 mod geo;

@@ -296,7 +296,10 @@ The merge endpoint rejects mismatched request hashes, unknown payload versions, 
 shards, or more than 256 MiB of decoded intermediate data.
 
 Hierarchical `Facet` columns use `POST /api/v1/tables/{table}/facets/{column}` with
-`{"root":"/services","limit":100,"filter":null}`. The response counts direct children.
+`{"root":"/services","limit":100,"filter":null,"exclude_own_filter":false}`. The response
+counts direct children. Set `exclude_own_filter` to `true` for multi-select navigation: structural
+`compare`, `between`, `in`, and `is_null` predicates on the requested facet column are removed while
+filters on every other column remain active.
 
 Replace a table's aliases with `PUT /api/v1/tables/{table}/aliases` and a JSON string array. Reads
 and writes resolve aliases to the same published generation. Reindex builds separately and swaps the

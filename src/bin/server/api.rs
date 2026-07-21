@@ -88,13 +88,23 @@ async fn facets(
 ) -> WebResult<Json<DataResponse<serde_json::Value>>> {
     let value = state
         .with_search(move |search| {
-            search.facets(
-                &table,
-                &column,
-                &body.root,
-                body.limit,
-                body.filter.as_ref(),
-            )
+            if body.exclude_own_filter {
+                search.facets_excluding_own_filter(
+                    &table,
+                    &column,
+                    &body.root,
+                    body.limit,
+                    body.filter.as_ref(),
+                )
+            } else {
+                search.facets(
+                    &table,
+                    &column,
+                    &body.root,
+                    body.limit,
+                    body.filter.as_ref(),
+                )
+            }
         })
         .await?;
     Ok(Json(DataResponse::new(value)))

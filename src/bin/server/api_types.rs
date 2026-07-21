@@ -154,6 +154,8 @@ pub(crate) struct FacetBody {
     pub(crate) limit: usize,
     #[serde(default)]
     pub(crate) filter: Option<Filter>,
+    #[serde(default)]
+    pub(crate) exclude_own_filter: bool,
 }
 
 fn default_facet_root() -> String {

@@ -249,6 +249,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn facet_endpoint_can_exclude_its_own_filter() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = router(AppState::open(directory.path(), None, None).unwrap());
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/tables",
+                serde_json::json!({
+                    "name":"items",
+                    "columns":[
+                        {"name":"id","data_type":"Integer","primary_key":true,"nullable":false,"analyzer":null},
+                        {"name":"category","data_type":"Facet","primary_key":false,"nullable":false,"analyzer":null},
+                        {"name":"status","data_type":"Text","primary_key":false,"nullable":false,"analyzer":"Raw"}
+                    ]
+                }),
+            ))
+            .await
+            .unwrap();
+        for (id, category, status) in [
+            (1, "/products/audio", "open"),
+            (2, "/products/books", "open"),
+            (3, "/products/games", "closed"),
+        ] {
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/v1/tables/items/rows",
+                    serde_json::json!({"id":id,"category":category,"status":status}),
+                ))
+                .await
+                .unwrap();
+        }
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/tables/items/facets/category",
+                serde_json::json!({
+                    "root":"/products",
+                    "exclude_own_filter":true,
+                    "filter":{"kind":"all","filters":[
+                        {"kind":"compare","column":"category","operator":"equal","value":"/products/audio"},
+                        {"kind":"compare","column":"status","operator":"equal","value":"open"}
+                    ]}
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["data"].as_array().unwrap().len(), 2);
+        assert_eq!(body["data"][0]["path"], "/products/audio");
+        assert_eq!(body["data"][1]["path"], "/products/books");
+    }
+
+    #[tokio::test]
     async fn distributed_aggregation_endpoints_round_trip_opaque_fruits() {
         let directory = tempfile::tempdir().unwrap();
         let app = router(AppState::open(directory.path(), None, None).unwrap());

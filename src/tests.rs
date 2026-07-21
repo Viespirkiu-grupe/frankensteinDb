@@ -5,6 +5,7 @@ mod support;
 use support::*;
 
 mod advanced_tests;
+mod facet_tests;
 mod geo_boundary_tests;
 mod geo_support;
 mod geo_tests;

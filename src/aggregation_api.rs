@@ -3,7 +3,9 @@ mod executor;
 mod filter;
 mod values;
 
-pub(crate) use executor::{collect_standard_aggregations, standard_aggregation_worker_count};
+pub(crate) use executor::{
+    collect_aggregation_results, collect_standard_aggregations, standard_aggregation_worker_count,
+};
 pub(super) use filter::typed_filter_aggregation;
 
 use bincode::Options;

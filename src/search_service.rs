@@ -17,7 +17,7 @@ impl SearchService {
     ) -> Result<Self> {
         let service = Self {
             root,
-            tables: Arc::new(RwLock::new(HashMap::new())),
+            tables: Arc::new(RwLock::new(SearchCatalog::default())),
             runtime: Arc::new(SearchRuntime::new(options)?),
         };
         service.publish_catalog(definitions)?;
@@ -31,8 +31,9 @@ impl SearchService {
             .read()
             .map_err(|_| anyhow!("search catalog lock was poisoned"))?;
         let mut definitions = tables
+            .canonical
             .values()
-            .map(|handle| handle.def.clone())
+            .map(|handle| (*handle.def).clone())
             .collect::<Vec<_>>();
         definitions.sort_by_key(|definition| definition.name.to_lowercase());
         Ok(definitions)
@@ -40,7 +41,7 @@ impl SearchService {
 
     /// Returns one definition from the in-memory published catalog.
     pub fn table(&self, name: &str) -> Result<TableDef> {
-        self.handle(name).map(|handle| handle.def)
+        self.handle(name).map(|handle| (*handle.def).clone())
     }
 
     /// Returns published table, segment, and live-document counts for observability.
@@ -50,43 +51,56 @@ impl SearchService {
             .read()
             .map_err(|_| anyhow!("search catalog lock was poisoned"))?;
         let segments = tables
+            .canonical
             .values()
             .map(|handle| handle.reader.searcher().segment_readers().len())
             .sum();
         let documents = tables
+            .canonical
             .values()
             .map(|handle| handle.reader.searcher().num_docs())
             .sum();
-        Ok((tables.len(), segments, documents))
+        Ok((tables.canonical.len(), segments, documents))
     }
 
     /// Executes a typed read using only the published Tantivy snapshot.
     pub fn read(&self, request: ReadRequest) -> Result<QueryResult> {
         let handle = self.handle(&request.table)?;
+        let json_cache = self.json_cache(&handle);
         execute_typed_read(
             &handle.def,
             &handle.index,
             &handle.reader,
             request,
             &self.runtime.pool,
+            Some(&json_cache),
         )
     }
 
     /// Explains a typed read using only in-memory metadata and Tantivy schema information.
     pub fn explain(&self, request: &ReadRequest) -> Result<QueryResult> {
         let handle = self.handle(&request.table)?;
-        explain_typed_read(&handle.def, &handle.index, &handle.reader, request)
+        let json_cache = self.json_cache(&handle);
+        explain_typed_read(
+            &handle.def,
+            &handle.index,
+            &handle.reader,
+            request,
+            Some(&json_cache),
+        )
     }
 
     /// Explains the score of one identity-selected hit using Tantivy's explanation tree.
     pub fn explain_score(&self, request: &ReadRequest, identity: &Filter) -> Result<Value> {
         let handle = self.handle(&request.table)?;
+        let json_cache = self.json_cache(&handle);
         explain_typed_score(
             &handle.def,
             &handle.index,
             &handle.reader,
             request,
             identity,
+            Some(&json_cache),
         )
     }
 
@@ -126,10 +140,10 @@ impl SearchService {
         aggregations: BTreeMap<String, Aggregation>,
     ) -> Result<Value> {
         let searcher = handle.reader.searcher();
-        validate_filter_only_json_paths(&searcher, &handle.def, filter)?;
-        validate_json_aggregation_paths(&searcher, &handle.def, &aggregations)?;
-        let fields = schema_fields(&handle.index.schema(), &handle.def)?;
-        let query = compile_filter(&handle.index, &handle.def, &fields, filter)?.query;
+        let json_cache = self.json_cache(handle);
+        validate_filter_only_json_paths(&searcher, &handle.def, filter, Some(&json_cache))?;
+        validate_json_aggregation_paths(&searcher, &handle.def, &aggregations, Some(&json_cache))?;
+        let query = compile_filter(&handle.index, &handle.def, &handle.fields, filter)?.query;
         let mut standard = BTreeMap::new();
         let mut geo = Vec::new();
         for (name, aggregation) in aggregations {
@@ -172,10 +186,10 @@ impl SearchService {
         );
         let handle = self.handle(table)?;
         let searcher = handle.reader.searcher();
-        validate_filter_only_json_paths(&searcher, &handle.def, filter)?;
-        validate_json_aggregation_paths(&searcher, &handle.def, &aggregations)?;
-        let fields = schema_fields(&handle.index.schema(), &handle.def)?;
-        let query = compile_filter(&handle.index, &handle.def, &fields, filter)?.query;
+        let json_cache = self.json_cache(&handle);
+        validate_filter_only_json_paths(&searcher, &handle.def, filter, Some(&json_cache))?;
+        validate_json_aggregation_paths(&searcher, &handle.def, &aggregations, Some(&json_cache))?;
+        let query = compile_filter(&handle.index, &handle.def, &handle.fields, filter)?.query;
         let request = compile_aggregations(&handle.def, &aggregations)?;
         collect_intermediate(&searcher, &*query, &request, &handle.index)
     }
@@ -192,7 +206,13 @@ impl SearchService {
             "geo_tile_grid does not support distributed intermediate results"
         );
         let handle = self.handle(table)?;
-        validate_json_aggregation_paths(&handle.reader.searcher(), &handle.def, &aggregations)?;
+        let json_cache = self.json_cache(&handle);
+        validate_json_aggregation_paths(
+            &handle.reader.searcher(),
+            &handle.def,
+            &aggregations,
+            Some(&json_cache),
+        )?;
         merge_intermediates(compile_aggregations(&handle.def, &aggregations)?, payloads)
     }
 
@@ -205,22 +225,25 @@ impl SearchService {
         let mut next = HashMap::with_capacity(definitions.len());
         let mut warmups = Vec::new();
         for def in definitions {
-            if let Some(existing) = current.remove(&def.name)
-                && serde_json::to_value(&existing.def)? == serde_json::to_value(&def)?
+            let canonical_name = def.name.to_ascii_lowercase();
+            if let Some(existing) = current.canonical.remove(&canonical_name)
+                && serde_json::to_value(&*existing.def)? == serde_json::to_value(&def)?
             {
                 let previous_segments = existing.reader.searcher().segment_readers().len();
                 existing.reader.reload()?;
                 let current_segments = existing.reader.searcher().segment_readers().len();
-                let handle = SearchHandle {
-                    def,
+                let handle = Arc::new(SearchHandle {
+                    def: Arc::new(def),
+                    fields: Arc::clone(&existing.fields),
+                    index: existing.index.clone(),
+                    reader: existing.reader.clone(),
                     generation: existing.generation.saturating_add(1),
-                    ..existing
-                };
+                });
                 self.runtime.invalidate_table(&handle.def.name);
                 if current_segments < previous_segments {
-                    warmups.push(handle.clone());
+                    warmups.push(Arc::clone(&handle));
                 }
-                next.insert(handle.def.name.clone(), handle);
+                next.insert(canonical_name, handle);
                 continue;
             }
             let index = Index::open_in_dir(self.root.join("indexes").join(&def.name))?;
@@ -229,17 +252,29 @@ impl SearchService {
                 .reader_builder()
                 .reload_policy(ReloadPolicy::Manual)
                 .try_into()?;
-            let handle = SearchHandle {
-                def,
+            let fields = Arc::new(schema_fields(&index.schema(), &def)?);
+            let handle = Arc::new(SearchHandle {
+                def: Arc::new(def),
+                fields,
                 index,
                 reader,
                 generation: 1,
-            };
+            });
             self.runtime.invalidate_table(&handle.def.name);
-            warmups.push(handle.clone());
-            next.insert(handle.def.name.clone(), handle);
+            warmups.push(Arc::clone(&handle));
+            next.insert(canonical_name, handle);
         }
-        *current = next;
+        let mut lookup = HashMap::new();
+        for handle in next.values() {
+            lookup.insert(handle.def.name.to_ascii_lowercase(), Arc::clone(handle));
+            for alias in &handle.def.aliases {
+                lookup.insert(alias.to_ascii_lowercase(), Arc::clone(handle));
+            }
+        }
+        *current = SearchCatalog {
+            canonical: next,
+            lookup,
+        };
         drop(current);
         for handle in warmups {
             self.runtime.schedule_warmup(handle);
@@ -247,21 +282,22 @@ impl SearchService {
         Ok(())
     }
 
-    pub(crate) fn handle(&self, name: &str) -> Result<SearchHandle> {
+    pub(crate) fn handle(&self, name: &str) -> Result<Arc<SearchHandle>> {
         self.tables
             .read()
             .map_err(|_| anyhow!("search catalog lock was poisoned"))?
-            .values()
-            .find(|handle| {
-                handle.def.name.eq_ignore_ascii_case(name)
-                    || handle
-                        .def
-                        .aliases
-                        .iter()
-                        .any(|alias| alias.eq_ignore_ascii_case(name))
-            })
+            .lookup
+            .get(&name.to_ascii_lowercase())
             .cloned()
             .ok_or_else(|| anyhow!("table not found: {name}"))
+    }
+
+    pub(crate) fn json_cache<'a>(&'a self, handle: &'a SearchHandle) -> JsonPathCacheContext<'a> {
+        JsonPathCacheContext {
+            runtime: &self.runtime,
+            table: &handle.def.name,
+            generation: handle.generation,
+        }
     }
 }
 

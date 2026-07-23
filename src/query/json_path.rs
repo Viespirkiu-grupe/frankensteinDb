@@ -1,5 +1,11 @@
 use super::*;
 
+pub(crate) struct JsonPathCacheContext<'a> {
+    pub(crate) runtime: &'a SearchRuntime,
+    pub(crate) table: &'a str,
+    pub(crate) generation: u64,
+}
+
 pub(crate) fn json_path_field(def: &TableDef, column_name: &str, path: &str) -> Result<String> {
     let column = column(def, column_name)?;
     ensure!(
@@ -94,13 +100,14 @@ pub(crate) fn validate_json_read_paths(
     searcher: &Searcher,
     def: &TableDef,
     request: &ReadRequest,
+    cache: Option<&JsonPathCacheContext<'_>>,
 ) -> Result<()> {
-    validate_filter_paths(searcher, def, request.filter.as_ref())?;
+    validate_filter_paths(searcher, def, request.filter.as_ref(), cache)?;
     for sort in &request.order_by {
         match (&sort.json_path, sort.json_type) {
             (None, None) => {}
             (Some(path), Some(data_type)) => {
-                validate_observed_type(searcher, def, &sort.column, path, data_type)?;
+                validate_observed_type(searcher, def, &sort.column, path, data_type, cache)?;
             }
             _ => bail!("JSON sort requires both json_path and json_type"),
         }
@@ -112,9 +119,10 @@ pub(crate) fn validate_json_aggregation_paths(
     searcher: &Searcher,
     def: &TableDef,
     aggregations: &BTreeMap<String, Aggregation>,
+    cache: Option<&JsonPathCacheContext<'_>>,
 ) -> Result<()> {
     for aggregation in aggregations.values() {
-        validate_aggregation_path(searcher, def, aggregation)?;
+        validate_aggregation_path(searcher, def, aggregation, cache)?;
     }
     Ok(())
 }
@@ -123,14 +131,16 @@ pub(crate) fn validate_filter_only_json_paths(
     searcher: &Searcher,
     def: &TableDef,
     filter: Option<&Filter>,
+    cache: Option<&JsonPathCacheContext<'_>>,
 ) -> Result<()> {
-    validate_filter_paths(searcher, def, filter)
+    validate_filter_paths(searcher, def, filter, cache)
 }
 
 fn validate_filter_paths(
     searcher: &Searcher,
     def: &TableDef,
     filter: Option<&Filter>,
+    cache: Option<&JsonPathCacheContext<'_>>,
 ) -> Result<()> {
     let Some(filter) = filter else { return Ok(()) };
     match filter {
@@ -145,13 +155,13 @@ fn validate_filter_paths(
             path,
             data_type,
             ..
-        } => validate_observed_type(searcher, def, column, path, *data_type),
+        } => validate_observed_type(searcher, def, column, path, *data_type, cache),
         Filter::JsonExists {
             column,
             path,
             data_type: Some(data_type),
             ..
-        } => validate_observed_type(searcher, def, column, path, *data_type),
+        } => validate_observed_type(searcher, def, column, path, *data_type, cache),
         Filter::JsonExists {
             column,
             path,
@@ -163,11 +173,11 @@ fn validate_filter_paths(
         }
         Filter::All { filters } | Filter::Any { filters } => {
             for filter in filters {
-                validate_filter_paths(searcher, def, Some(filter))?;
+                validate_filter_paths(searcher, def, Some(filter), cache)?;
             }
             Ok(())
         }
-        Filter::Not { filter } => validate_filter_paths(searcher, def, Some(filter)),
+        Filter::Not { filter } => validate_filter_paths(searcher, def, Some(filter), cache),
         _ => Ok(()),
     }
 }
@@ -176,9 +186,10 @@ fn validate_aggregation_path(
     searcher: &Searcher,
     def: &TableDef,
     aggregation: &Aggregation,
+    cache: Option<&JsonPathCacheContext<'_>>,
 ) -> Result<()> {
     if let Aggregation::Filter { filter, .. } = aggregation {
-        validate_filter_paths(searcher, def, Some(filter))?;
+        validate_filter_paths(searcher, def, Some(filter), cache)?;
     }
     let (target, children) = match aggregation {
         Aggregation::JsonTerms {
@@ -217,6 +228,7 @@ fn validate_aggregation_path(
             &target.column,
             &target.path,
             target.data_type,
+            cache,
         )?;
     }
     if let Aggregation::Composite { sources, .. } = aggregation {
@@ -228,6 +240,7 @@ fn validate_aggregation_path(
                     &target.column,
                     &target.path,
                     target.data_type,
+                    cache,
                 )?;
             }
         }
@@ -237,14 +250,14 @@ fn validate_aggregation_path(
             match (&sort.json_path, sort.json_type) {
                 (None, None) => {}
                 (Some(path), Some(data_type)) => {
-                    validate_observed_type(searcher, def, &sort.column, path, data_type)?;
+                    validate_observed_type(searcher, def, &sort.column, path, data_type, cache)?;
                 }
                 _ => bail!("JSON sort requires both json_path and json_type"),
             }
         }
     }
     if let Some(children) = children {
-        validate_json_aggregation_paths(searcher, def, children)?;
+        validate_json_aggregation_paths(searcher, def, children, cache)?;
     }
     Ok(())
 }
@@ -255,14 +268,25 @@ fn validate_observed_type(
     column: &str,
     path: &str,
     expected: JsonPathType,
+    cache: Option<&JsonPathCacheContext<'_>>,
 ) -> Result<()> {
     let full_path = json_path_field(def, column, path)?;
-    let mut observed = std::collections::BTreeSet::new();
-    for segment in searcher.segment_readers() {
-        for handle in segment.fast_fields().dynamic_column_handles(&full_path)? {
-            observed.insert(handle.column_type());
+    let load = || {
+        let mut observed = std::collections::BTreeSet::new();
+        for segment in searcher.segment_readers() {
+            for handle in segment.fast_fields().dynamic_column_handles(&full_path)? {
+                observed.insert(handle.column_type());
+            }
         }
-    }
+        Ok(observed)
+    };
+    let observed = if let Some(cache) = cache {
+        cache
+            .runtime
+            .cached_json_path_types(cache.table, cache.generation, &full_path, load)?
+    } else {
+        load()?
+    };
     ensure!(
         !observed.is_empty(),
         "JSON path does not exist: {full_path}"

@@ -10,8 +10,8 @@ use tantivy::schema::Term;
 use tantivy::{DocId, DocSet, Index, Score, SegmentReader, TERMINATED, TantivyError};
 
 use super::{
-    GeoBounds, GeoDistanceMode, GeoPoint, decode_points, distance_for_points, geo_coordinate_field,
-    geo_latitude_field, geo_longitude_field, haversine_distance_meters,
+    GeoBounds, GeoDistanceMode, GeoPoint, distance_for_encoded_points, encoded_points_match,
+    geo_coordinate_field, geo_latitude_field, geo_longitude_field, haversine_distance_meters,
 };
 use crate::query::column;
 use crate::{ColumnType, Comparison, TableDef};
@@ -32,22 +32,22 @@ enum GeoPredicate {
 }
 
 impl GeoPredicate {
-    fn matches(&self, points: &[GeoPoint]) -> bool {
+    fn matches_encoded(&self, encoded: &[u8]) -> Result<bool> {
         match self {
             Self::Radius {
                 center,
                 radius_meters,
-            } => points
-                .iter()
-                .any(|point| haversine_distance_meters(*center, *point) <= *radius_meters),
-            Self::Bounds(bounds) => points.iter().any(|point| bounds.contains(*point)),
+            } => encoded_points_match(encoded, |point| {
+                haversine_distance_meters(*center, point) <= *radius_meters
+            }),
+            Self::Bounds(bounds) => encoded_points_match(encoded, |point| bounds.contains(point)),
             Self::DistanceCompare {
                 center,
                 mode,
                 operator,
                 distance_meters,
-            } => distance_for_points(points, *center, *mode)
-                .is_some_and(|distance| compare_distance(distance, *operator, *distance_meters)),
+            } => Ok(distance_for_encoded_points(encoded, *center, *mode)?
+                .is_some_and(|distance| compare_distance(distance, *operator, *distance_meters))),
         }
     }
 }
@@ -155,7 +155,9 @@ impl GeoPredicateScorer {
         if self.coordinates.ord_to_bytes(ord, &mut self.encoded).ok() != Some(true) {
             return false;
         }
-        decode_points(&self.encoded).is_ok_and(|points| self.predicate.matches(&points))
+        self.predicate
+            .matches_encoded(&self.encoded)
+            .unwrap_or(false)
     }
 }
 

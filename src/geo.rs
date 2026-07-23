@@ -107,8 +107,9 @@ pub use encoding::haversine_distance_meters;
 #[cfg(test)]
 pub(crate) use encoding::morton_z31;
 pub(crate) use encoding::{
-    decode_points, distance_for_points, encoded_points, index_geo_points, morton_at_zoom,
-    morton_xy, parse_geo_json, validate_encoded_points,
+    decode_points, distance_for_encoded_points, distance_for_points, encoded_points,
+    encoded_points_match, index_geo_points, morton_at_zoom, morton_xy, parse_geo_json,
+    validate_encoded_points,
 };
 mod query;
 pub(crate) use query::*;

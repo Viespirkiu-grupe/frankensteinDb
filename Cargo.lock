@@ -599,6 +599,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "hex",
+ "lru",
  "rayon",
  "rusqlite",
  "serde",

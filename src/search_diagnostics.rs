@@ -19,9 +19,10 @@ impl SearchService {
         let handle = self.handle(&request.table)?;
         let lookup_ms = started.elapsed().as_secs_f64() * 1_000.0;
         let compile_started = std::time::Instant::now();
-        let fields = schema_fields(&handle.index.schema(), &handle.def)?;
+        let fields = Arc::clone(&handle.fields);
         let searcher = handle.reader.searcher();
-        validate_json_read_paths(&searcher, &handle.def, &request)?;
+        let json_cache = self.json_cache(&handle);
+        validate_json_read_paths(&searcher, &handle.def, &request, Some(&json_cache))?;
         let order = stable_typed_order(&handle.def, &request);
         let native_sort = typed_native_sort(&request, &handle.def, &order);
         let effective_filter =
@@ -80,6 +81,7 @@ impl SearchService {
                 &handle.reader,
                 request,
                 &self.runtime.pool,
+                Some(&json_cache),
             )?
             .rows
             .len()
@@ -158,14 +160,20 @@ impl SearchService {
             "facet endpoint requires FACET or FACET[] column"
         );
         ensure!(root.starts_with('/'), "facet root must start with '/'");
-        let fields = schema_fields(&handle.index.schema(), &handle.def)?;
+        let fields = Arc::clone(&handle.fields);
         let searcher = handle.reader.searcher();
         let effective_filter = if exclude_own_filter {
             filter.and_then(|filter| filter_without_column(filter, column_name))
         } else {
             filter.cloned()
         };
-        validate_filter_only_json_paths(&searcher, &handle.def, effective_filter.as_ref())?;
+        let json_cache = self.json_cache(&handle);
+        validate_filter_only_json_paths(
+            &searcher,
+            &handle.def,
+            effective_filter.as_ref(),
+            Some(&json_cache),
+        )?;
         let query = compile_filter(
             &handle.index,
             &handle.def,

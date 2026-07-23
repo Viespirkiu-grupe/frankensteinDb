@@ -88,7 +88,11 @@ impl SearchService {
                     .def
                     .columns
                     .iter()
-                    .map(|column| row.values.get(&column.name).cloned().unwrap_or(Value::Null))
+                    .map(|column| {
+                        row_value(&row, &column.name)
+                            .cloned()
+                            .unwrap_or(Value::Null)
+                    })
                     .collect::<Vec<_>>();
                 values.push(json!(row.score));
                 values
@@ -207,11 +211,18 @@ fn load_seed(
         search_after: None,
         min_score: None,
     };
-    execute_typed_read(&handle.def, &handle.index, &handle.reader, request, pool)?
-        .rows
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("seed row not found"))
+    execute_typed_read(
+        &handle.def,
+        &handle.index,
+        &handle.reader,
+        request,
+        pool,
+        None,
+    )?
+    .rows
+    .into_iter()
+    .next()
+    .ok_or_else(|| anyhow!("seed row not found"))
 }
 
 fn similarity_values(
@@ -306,7 +317,7 @@ fn similarity_query(
     }
     let mut clauses: Vec<(Occur, Box<dyn Query>)> =
         vec![(Occur::Must, Box::new(builder.with_document_fields(values)))];
-    let fields = schema_fields(&handle.index.schema(), &handle.def)?;
+    let fields = Arc::clone(&handle.fields);
     if let Some(filter) = &options.filter {
         let filter = compile_filter(&handle.index, &handle.def, &fields, Some(filter))?.query;
         clauses.push((Occur::Must, Box::new(ConstScoreQuery::new(filter, 0.0))));

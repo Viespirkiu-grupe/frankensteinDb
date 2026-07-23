@@ -42,6 +42,50 @@ pub(crate) fn distance_for_points(
     })
 }
 
+pub(crate) fn distance_for_encoded_points(
+    encoded: &[u8],
+    origin: GeoPoint,
+    mode: GeoDistanceMode,
+) -> Result<Option<f64>> {
+    ensure!(
+        encoded.len().is_multiple_of(ENCODED_POINT_BYTES),
+        "corrupt geo coordinate fast field"
+    );
+    let mut count = 0usize;
+    let mut distance = None;
+    for chunk in encoded.chunks_exact(ENCODED_POINT_BYTES) {
+        let point = decode_point(chunk)?;
+        let current = haversine_distance_meters(origin, point);
+        count += 1;
+        distance = Some(match (mode, distance) {
+            (_, None) => current,
+            (GeoDistanceMode::Min, Some(value)) => f64::min(value, current),
+            (GeoDistanceMode::Max, Some(value)) => f64::max(value, current),
+            (GeoDistanceMode::Average, Some(value)) => value + current,
+        });
+    }
+    Ok(match (mode, distance) {
+        (GeoDistanceMode::Average, Some(sum)) => Some(sum / count as f64),
+        (_, value) => value,
+    })
+}
+
+pub(crate) fn encoded_points_match(
+    encoded: &[u8],
+    mut predicate: impl FnMut(GeoPoint) -> bool,
+) -> Result<bool> {
+    ensure!(
+        encoded.len().is_multiple_of(ENCODED_POINT_BYTES),
+        "corrupt geo coordinate fast field"
+    );
+    for chunk in encoded.chunks_exact(ENCODED_POINT_BYTES) {
+        if predicate(decode_point(chunk)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn encode_points(points: &[GeoPoint]) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(points.len() * ENCODED_POINT_BYTES);
     for point in points {
@@ -91,12 +135,14 @@ pub(crate) fn decode_points(encoded: &[u8]) -> Result<Vec<GeoPoint>> {
     );
     encoded
         .chunks_exact(ENCODED_POINT_BYTES)
-        .map(|chunk| {
-            let lat = f64::from_le_bytes(chunk[0..8].try_into().expect("eight bytes"));
-            let lon = f64::from_le_bytes(chunk[8..16].try_into().expect("eight bytes"));
-            GeoPoint { lat, lon }.validate()
-        })
+        .map(decode_point)
         .collect()
+}
+
+fn decode_point(chunk: &[u8]) -> Result<GeoPoint> {
+    let lat = f64::from_le_bytes(chunk[0..8].try_into().expect("eight bytes"));
+    let lon = f64::from_le_bytes(chunk[8..16].try_into().expect("eight bytes"));
+    GeoPoint { lat, lon }.validate()
 }
 
 pub(crate) fn encoded_points(encoded: &[u8]) -> impl Iterator<Item = (GeoPoint, u64)> + '_ {

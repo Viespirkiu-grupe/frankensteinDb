@@ -5,28 +5,31 @@ impl Database {
     pub fn read(&mut self, request: ReadRequest) -> Result<QueryResult> {
         self.recover()?;
         let def = self.table(&request.table)?;
-        let index = self.index_handle(&def)?.index.clone();
-        let reader = self.index_handle(&def)?.reader.clone();
+        let handle = self.index_handle(&def)?;
+        let index = handle.index.clone();
+        let reader = handle.reader.clone();
         let pool = crate::search_runtime::system_search_pool()?;
-        execute_typed_read(&def, &index, &reader, request, &pool)
+        execute_typed_read(&def, &index, &reader, request, &pool, None)
     }
 
     /// Describes the Tantivy collector and typed read plan without executing the search.
     pub fn explain(&mut self, request: &ReadRequest) -> Result<QueryResult> {
         self.recover()?;
         let def = self.table(&request.table)?;
-        let index = self.index_handle(&def)?.index.clone();
-        let reader = self.index_handle(&def)?.reader.clone();
-        explain_typed_read(&def, &index, &reader, request)
+        let handle = self.index_handle(&def)?;
+        let index = handle.index.clone();
+        let reader = handle.reader.clone();
+        explain_typed_read(&def, &index, &reader, request, None)
     }
 
     /// Explains the BM25 score of one Tantivy document selected by an identity filter.
     pub fn explain_score(&mut self, request: &ReadRequest, identity: &Filter) -> Result<Value> {
         self.recover()?;
         let def = self.table(&request.table)?;
-        let index = self.index_handle(&def)?.index.clone();
-        let reader = self.index_handle(&def)?.reader.clone();
-        explain_typed_score(&def, &index, &reader, request, identity)
+        let handle = self.index_handle(&def)?;
+        let index = handle.index.clone();
+        let reader = handle.reader.clone();
+        explain_typed_score(&def, &index, &reader, request, identity, None)
     }
 }
 
@@ -36,6 +39,7 @@ pub(crate) fn explain_typed_score(
     reader: &IndexReader,
     request: &ReadRequest,
     identity: &Filter,
+    json_cache: Option<&JsonPathCacheContext<'_>>,
 ) -> Result<Value> {
     ensure!(
         request.group_by.is_empty(),
@@ -43,8 +47,8 @@ pub(crate) fn explain_typed_score(
     );
     let fields = schema_fields(&index.schema(), def)?;
     let searcher = reader.searcher();
-    validate_json_read_paths(&searcher, def, request)?;
-    validate_filter_only_json_paths(&searcher, def, Some(identity))?;
+    validate_json_read_paths(&searcher, def, request, json_cache)?;
+    validate_filter_only_json_paths(&searcher, def, Some(identity), json_cache)?;
     let query = compile_filter(index, def, &fields, request.filter.as_ref())?.query;
     let identity_query = compile_filter(index, def, &fields, Some(identity))?.query;
     let documents = searcher.search(&*identity_query, &DocSetCollector)?;
@@ -72,39 +76,61 @@ pub(crate) fn execute_typed_read(
     reader: &IndexReader,
     request: ReadRequest,
     pool: &rayon::ThreadPool,
+    json_cache: Option<&JsonPathCacheContext<'_>>,
 ) -> Result<QueryResult> {
     let fields = schema_fields(&index.schema(), def)?;
     let searcher = reader.searcher();
-    validate_json_read_paths(&searcher, def, &request)?;
+    validate_json_read_paths(&searcher, def, &request, json_cache)?;
     let order = stable_typed_order(def, &request);
     validate_typed_sort(def, &order)?;
+    if let Some(min_score) = request.min_score {
+        ensure!(min_score.is_finite(), "min_score must be finite");
+    }
     if typed_is_aggregation(&request) {
         ensure!(
             request.search_after.is_none(),
             "search_after is not supported for aggregations"
         );
         let plan = compile_filter(index, def, &fields, request.filter.as_ref())?;
-        return execute_typed_aggregation(&searcher, &*plan.query, def, &request, &order);
+        return execute_typed_aggregation(
+            &searcher,
+            &*plan.query,
+            def,
+            index,
+            &request,
+            &order,
+            pool,
+        );
     }
     let native_sort = typed_native_sort(&request, def, &order);
+    let scored_sort = native_sort
+        .is_none()
+        .then(|| typed_scored_sort(&request, def, &order))
+        .flatten();
     let effective_filter = filter_after_cursor(def, &request, &order, native_sort.as_ref())?;
     let plan = compile_filter(index, def, &fields, effective_filter.as_ref())?;
     let cursor_mode = cursor_pagination_enabled(def, &request, &order, native_sort.as_ref());
-    let full_scan = typed_requires_full_scan(&request, &order) && native_sort.is_none();
+    let full_scan = typed_requires_full_scan(&request, &order)
+        && native_sort.is_none()
+        && scored_sort.is_none();
     let collection_limit = request
         .limit
         .saturating_add(usize::from(cursor_mode && request.limit > 0));
     let mut docs = collect_typed_docs(
         &searcher,
         &*plan.query,
-        native_sort.as_ref(),
-        full_scan,
-        collection_limit,
-        request.offset,
-        pool,
+        TypedCollection {
+            native_sort: native_sort.as_ref(),
+            scored_sort: scored_sort.as_ref(),
+            full_scan,
+            limit: collection_limit,
+            offset: request.offset,
+            pool,
+        },
     )?;
-    if let Some(min_score) = request.min_score {
-        ensure!(min_score.is_finite(), "min_score must be finite");
+    if scored_sort.is_none()
+        && let Some(min_score) = request.min_score
+    {
         docs.retain(|(score, _)| *score >= min_score);
     }
     let projected = required_typed_columns(def, &request, &order, full_scan || cursor_mode)?;
@@ -127,8 +153,9 @@ pub(crate) fn explain_typed_read(
     index: &Index,
     reader: &IndexReader,
     request: &ReadRequest,
+    json_cache: Option<&JsonPathCacheContext<'_>>,
 ) -> Result<QueryResult> {
-    validate_json_read_paths(&reader.searcher(), def, request)?;
+    validate_json_read_paths(&reader.searcher(), def, request, json_cache)?;
     let fields = schema_fields(&index.schema(), def)?;
     let order = stable_typed_order(def, request);
     validate_typed_sort(def, &order)?;
@@ -136,10 +163,15 @@ pub(crate) fn explain_typed_read(
     let native_sort = (!aggregation)
         .then(|| typed_native_sort(request, def, &order))
         .flatten();
+    let scored_sort = (!aggregation && native_sort.is_none())
+        .then(|| typed_scored_sort(request, def, &order))
+        .flatten();
     let effective_filter = filter_after_cursor(def, request, &order, native_sort.as_ref())?;
     compile_filter(index, def, &fields, effective_filter.as_ref())?;
     let collector = if aggregation {
         "aggregation"
+    } else if scored_sort.is_some() {
+        "scored_fast_field_top_docs"
     } else if native_sort.as_ref().is_some_and(block_top_k_supported) {
         "block_fast_field_top_docs"
     } else if native_sort.is_some() {
@@ -215,33 +247,51 @@ fn validate_typed_sort(def: &TableDef, order: &[OrderSpec]) -> Result<()> {
     Ok(())
 }
 
-fn collect_typed_docs(
-    searcher: &Searcher,
-    query: &dyn Query,
-    native_sort: Option<&NativeSort>,
+struct TypedCollection<'a> {
+    native_sort: Option<&'a NativeSort>,
+    scored_sort: Option<&'a ScoredSort>,
     full_scan: bool,
     limit: usize,
     offset: usize,
-    pool: &rayon::ThreadPool,
+    pool: &'a rayon::ThreadPool,
+}
+
+fn collect_typed_docs(
+    searcher: &Searcher,
+    query: &dyn Query,
+    collection: TypedCollection<'_>,
 ) -> Result<Vec<(f32, DocAddress)>> {
-    if full_scan {
-        let count = searcher.search(query, &Count)?;
-        return if count == 0 {
-            Ok(Vec::new())
-        } else {
-            Ok(searcher.search(query, &TopDocs::with_limit(count).order_by_score())?)
-        };
+    if let Some(sort) = collection.scored_sort {
+        return collect_scored_top_k(searcher, query, sort, collection.limit, collection.offset);
     }
-    if limit == 0 {
+    if collection.full_scan {
+        let mut addresses = searcher
+            .search(query, &DocSetCollector)?
+            .into_iter()
+            .collect::<Vec<_>>();
+        addresses.sort_unstable();
+        return Ok(addresses
+            .into_iter()
+            .map(|address| (0.0, address))
+            .collect());
+    }
+    if collection.limit == 0 {
         return Ok(Vec::new());
     }
-    if let Some(sort) = native_sort {
-        return collect_native_sorted_docs(searcher, query, sort, limit, offset, pool);
+    if let Some(sort) = collection.native_sort {
+        return collect_native_sorted_docs(
+            searcher,
+            query,
+            sort,
+            collection.limit,
+            collection.offset,
+            collection.pool,
+        );
     }
     Ok(searcher.search(
         query,
-        &TopDocs::with_limit(limit)
-            .and_offset(offset)
+        &TopDocs::with_limit(collection.limit)
+            .and_offset(collection.offset)
             .order_by_score(),
     )?)
 }
@@ -253,6 +303,13 @@ pub(crate) fn load_typed_rows(
 ) -> Result<Vec<ResultRow>> {
     let mut fast_readers = HashMap::new();
     let mut rows = Vec::with_capacity(docs.len());
+    let column_indices = Arc::new(
+        columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| (column.name.to_ascii_lowercase(), index))
+            .collect::<HashMap<_, _>>(),
+    );
     for (score, address) in docs {
         if let std::collections::hash_map::Entry::Vacant(entry) =
             fast_readers.entry(address.segment_ord)
@@ -263,12 +320,13 @@ pub(crate) fn load_typed_rows(
                 columns,
             )?);
         }
-        let mut values = HashMap::new();
+        let mut values = Vec::with_capacity(columns.len());
         for reader in &fast_readers[&address.segment_ord] {
-            values.insert(reader.name.clone(), reader.value(address.doc_id)?);
+            values.push(reader.value(address.doc_id)?);
         }
         rows.push(ResultRow {
             values,
+            columns: Arc::clone(&column_indices),
             score: score as f64,
         });
     }

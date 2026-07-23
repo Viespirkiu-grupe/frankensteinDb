@@ -1,6 +1,8 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use super::*;
@@ -19,12 +21,37 @@ impl AggregationCacheKey {
         filter: Option<&Filter>,
         aggregations: &BTreeMap<String, Aggregation>,
     ) -> Result<Self> {
-        let request = json!({"filter": filter, "aggregations": aggregations});
+        #[derive(serde::Serialize)]
+        struct CacheRequest<'a> {
+            filter: Option<&'a Filter>,
+            aggregations: &'a BTreeMap<String, Aggregation>,
+        }
+        let mut hasher = Sha256::new();
+        serde_json::to_writer(
+            DigestWriter(&mut hasher),
+            &CacheRequest {
+                filter,
+                aggregations,
+            },
+        )?;
         Ok(Self {
             table: table.to_ascii_lowercase(),
             generation,
-            request_hash: Sha256::digest(serde_json::to_vec(&request)?).into(),
+            request_hash: hasher.finalize().into(),
         })
+    }
+}
+
+struct DigestWriter<'a>(&'a mut Sha256);
+
+impl std::io::Write for DigestWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -33,6 +60,7 @@ pub(crate) struct SearchRuntime {
     cache: Mutex<AggregationCache>,
     scheduled_warmups: Arc<Mutex<HashSet<(String, u64)>>>,
     warmup_fast_fields: bool,
+    json_path_types: Mutex<HashMap<(String, u64, String), BTreeSet<DynamicColumnType>>>,
 }
 
 impl SearchRuntime {
@@ -47,6 +75,7 @@ impl SearchRuntime {
             cache: Mutex::new(AggregationCache::new(options.aggregation_cache_entries)),
             scheduled_warmups: Arc::new(Mutex::new(HashSet::new())),
             warmup_fast_fields: options.warmup_fast_fields,
+            json_path_types: Mutex::new(HashMap::new()),
         })
     }
 
@@ -68,9 +97,32 @@ impl SearchRuntime {
         if let Ok(mut cache) = self.cache.lock() {
             cache.remove_table(table);
         }
+        if let Ok(mut types) = self.json_path_types.lock() {
+            types.retain(|(cached_table, _, _), _| !cached_table.eq_ignore_ascii_case(table));
+        }
     }
 
-    pub(crate) fn schedule_warmup(&self, handle: SearchHandle) {
+    pub(crate) fn cached_json_path_types(
+        &self,
+        table: &str,
+        generation: u64,
+        path: &str,
+        load: impl FnOnce() -> Result<BTreeSet<DynamicColumnType>>,
+    ) -> Result<BTreeSet<DynamicColumnType>> {
+        let key = (table.to_ascii_lowercase(), generation, path.to_owned());
+        if let Ok(types) = self.json_path_types.lock()
+            && let Some(observed) = types.get(&key)
+        {
+            return Ok(observed.clone());
+        }
+        let observed = load()?;
+        if let Ok(mut types) = self.json_path_types.lock() {
+            types.insert(key, observed.clone());
+        }
+        Ok(observed)
+    }
+
+    pub(crate) fn schedule_warmup(&self, handle: Arc<SearchHandle>) {
         if !self.warmup_fast_fields {
             return;
         }
@@ -82,8 +134,10 @@ impl SearchRuntime {
             .unwrap_or(false);
         if should_schedule {
             let scheduled_warmups = Arc::clone(&self.scheduled_warmups);
-            self.pool.spawn(move || {
-                let _ = warm_fast_fields(&handle);
+            let pool = Arc::clone(&self.pool);
+            let executor = Arc::clone(&self.pool);
+            executor.spawn(move || {
+                let _ = warm_fast_fields(&handle, &pool);
                 if let Ok(mut warmups) = scheduled_warmups.lock() {
                     warmups.remove(&key);
                 }
@@ -117,53 +171,41 @@ fn build_search_pool(worker_threads: usize) -> Result<Arc<rayon::ThreadPool>> {
 }
 
 struct AggregationCache {
-    capacity: usize,
-    values: HashMap<AggregationCacheKey, Value>,
-    recency: VecDeque<AggregationCacheKey>,
+    values: Option<lru::LruCache<AggregationCacheKey, Value>>,
 }
 
 impl AggregationCache {
     fn new(capacity: usize) -> Self {
         Self {
-            capacity,
-            values: HashMap::new(),
-            recency: VecDeque::new(),
+            values: NonZeroUsize::new(capacity).map(lru::LruCache::new),
         }
     }
 
     fn get(&mut self, key: &AggregationCacheKey) -> Option<Value> {
-        let value = self.values.get(key)?.clone();
-        self.touch(key);
-        Some(value)
+        self.values.as_mut()?.get(key).cloned()
     }
 
     fn insert(&mut self, key: AggregationCacheKey, value: Value) {
-        if self.capacity == 0 {
-            return;
+        if let Some(values) = &mut self.values {
+            values.put(key, value);
         }
-        self.values.insert(key.clone(), value);
-        self.touch(&key);
-        while self.values.len() > self.capacity {
-            if let Some(oldest) = self.recency.pop_front() {
-                self.values.remove(&oldest);
-            }
-        }
-    }
-
-    fn touch(&mut self, key: &AggregationCacheKey) {
-        self.recency.retain(|candidate| candidate != key);
-        self.recency.push_back(key.clone());
     }
 
     fn remove_table(&mut self, table: &str) {
-        self.values
-            .retain(|key, _| !key.table.eq_ignore_ascii_case(table));
-        self.recency
-            .retain(|key| !key.table.eq_ignore_ascii_case(table));
+        if let Some(values) = &mut self.values {
+            let keys = values
+                .iter()
+                .filter(|(key, _)| key.table.eq_ignore_ascii_case(table))
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            for key in keys {
+                values.pop(&key);
+            }
+        }
     }
 }
 
-fn warm_fast_fields(handle: &SearchHandle) -> Result<()> {
+fn warm_fast_fields(handle: &SearchHandle, pool: &rayon::ThreadPool) -> Result<()> {
     let searcher = handle.reader.searcher();
     let fields = handle
         .def
@@ -187,25 +229,30 @@ fn warm_fast_fields(handle: &SearchHandle) -> Result<()> {
         })
         .map(|column| (aggregation_field(column), column.data_type))
         .collect::<Vec<_>>();
-    for segment in searcher.segment_readers() {
-        let max_doc = segment.max_doc();
-        for (field, data_type) in &fields {
-            if matches!(
-                data_type,
-                ColumnType::Text
-                    | ColumnType::TextArray
-                    | ColumnType::Facet
-                    | ColumnType::FacetArray
-            ) {
-                if let Some(column) = segment.fast_fields().str(field)? {
-                    warm_string_column(&column, max_doc)?;
+    let segments = searcher.segment_readers();
+    pool.install(|| {
+        (0..segments.len().saturating_mul(fields.len()))
+            .into_par_iter()
+            .try_for_each(|work| -> Result<()> {
+                let segment = &segments[work / fields.len()];
+                let (field, data_type) = &fields[work % fields.len()];
+                let max_doc = segment.max_doc();
+                if matches!(
+                    data_type,
+                    ColumnType::Text
+                        | ColumnType::TextArray
+                        | ColumnType::Facet
+                        | ColumnType::FacetArray
+                ) {
+                    if let Some(column) = segment.fast_fields().str(field)? {
+                        warm_string_column(&column, max_doc)?;
+                    }
+                } else if let Some((column, _)) = segment.fast_fields().u64_lenient(field)? {
+                    warm_column(&column, max_doc);
                 }
-            } else if let Some((column, _)) = segment.fast_fields().u64_lenient(field)? {
-                warm_column(&column, max_doc);
-            }
-        }
-    }
-    Ok(())
+                Ok(())
+            })
+    })
 }
 
 fn warm_column(column: &Column<u64>, max_doc: DocId) {
@@ -221,11 +268,11 @@ fn warm_column(column: &Column<u64>, max_doc: DocId) {
 }
 
 fn warm_string_column(column: &StrColumn, max_doc: DocId) -> Result<()> {
-    for doc in 0..max_doc {
-        for ordinal in column.term_ords(doc) {
+    (0..max_doc).into_par_iter().for_each(|doc| {
+        column.term_ords(doc).for_each(|ordinal| {
             std::hint::black_box(ordinal);
-        }
-    }
+        });
+    });
     let mut value = String::new();
     for ordinal in 0..column.num_terms() as u64 {
         value.clear();

@@ -2,7 +2,8 @@ use super::*;
 
 #[derive(Clone)]
 pub(super) struct ResultRow {
-    pub(super) values: HashMap<String, Value>,
+    pub(super) values: Vec<Value>,
+    pub(super) columns: Arc<HashMap<String, usize>>,
     pub(super) score: f64,
 }
 
@@ -12,7 +13,6 @@ mod json_path;
 pub(crate) use json_path::*;
 
 pub(super) struct ProjectedFastReader {
-    pub(super) name: String,
     pub(super) data_type: ColumnType,
     pub(super) values: FastValues,
 }
@@ -87,6 +87,16 @@ impl FastValues {
                     .expect("valid bytes fast-field dictionary");
                 OwnedValue::Bytes(output)
             }
+        }
+    }
+
+    fn sort_owned_value(&self, doc_id: DocId) -> OwnedValue {
+        match self {
+            Self::Ip(values) => values
+                .first(doc_id)
+                .map(OwnedValue::IpAddr)
+                .unwrap_or(OwnedValue::Null),
+            _ => self.global_sort_value(self.segment_sort_value(doc_id)),
         }
     }
 }
@@ -224,7 +234,6 @@ pub(super) fn segment_fast_readers(
                 _ => unreachable!("array types are handled by the guarded arm"),
             };
             Ok(ProjectedFastReader {
-                name: column.name.clone(),
                 data_type: column.data_type,
                 values,
             })
@@ -259,9 +268,24 @@ pub(super) fn geo_distance_value(
     origin: GeoPoint,
     mode: GeoDistanceMode,
 ) -> Option<f64> {
-    geo_points_value(values, doc_id)
+    geo_distance_value_with_buffer(values, doc_id, origin, mode, &mut Vec::new())
+}
+
+pub(super) fn geo_distance_value_with_buffer(
+    values: &BytesColumn,
+    doc_id: DocId,
+    origin: GeoPoint,
+    mode: GeoDistanceMode,
+    encoded: &mut Vec<u8>,
+) -> Option<f64> {
+    encoded.clear();
+    let ord = values.ords().first(doc_id)?;
+    if values.ord_to_bytes(ord, encoded).ok() != Some(true) {
+        return None;
+    }
+    distance_for_encoded_points(encoded, origin, mode)
         .ok()
-        .and_then(|points| distance_for_points(&points, origin, mode))
+        .flatten()
 }
 
 mod advanced_text;
@@ -269,7 +293,9 @@ mod aggregation;
 mod block_top_k;
 mod compiler;
 mod cursor;
+mod filter_score;
 mod projection;
+mod scored_top_k;
 mod scoring;
 mod typed_aggregation;
 mod typed_compiler;
@@ -281,7 +307,9 @@ pub(super) use aggregation::*;
 use block_top_k::collect_block_top_k;
 pub(super) use compiler::*;
 pub(super) use cursor::*;
+use filter_score::*;
 pub(super) use projection::*;
+pub(super) use scored_top_k::*;
 pub(super) use scoring::*;
 pub(super) use typed_aggregation::*;
 pub(super) use typed_compiler::*;

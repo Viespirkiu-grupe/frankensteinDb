@@ -92,10 +92,26 @@ impl Collector for BlockTopKCollector {
             .fields
             .iter()
             .map(|field| {
+                if let Some(origin) = field.geo_distance_from {
+                    return segment
+                        .fast_fields()
+                        .bytes(&geo_coordinate_field(&field.field))?
+                        .map(|coordinates| BlockSortReader::Geo {
+                            coordinates,
+                            origin,
+                            mode: field.geo_distance_mode,
+                        })
+                        .ok_or_else(|| {
+                            tantivy::TantivyError::SchemaError(format!(
+                                "missing geo fast field: {}",
+                                field.field
+                            ))
+                        });
+                }
                 segment
                     .fast_fields()
                     .u64_lenient(&field.field)?
-                    .map(|(column, _)| column)
+                    .map(|(column, _)| BlockSortReader::Numeric(column))
                     .ok_or_else(|| {
                         tantivy::TantivyError::SchemaError(format!(
                             "missing fast field: {}",
@@ -138,15 +154,25 @@ impl Collector for BlockTopKCollector {
 
 struct BlockTopKSegmentCollector {
     segment_ord: SegmentOrdinal,
-    readers: Vec<Column<u64>>,
+    readers: Vec<BlockSortReader>,
     values: Vec<[Option<u64>; COLLECT_BLOCK_BUFFER_LEN]>,
     top_hits: BufferedTopK,
+    encoded: Vec<u8>,
+}
+
+enum BlockSortReader {
+    Numeric(Column<u64>),
+    Geo {
+        coordinates: BytesColumn,
+        origin: GeoPoint,
+        mode: GeoDistanceMode,
+    },
 }
 
 impl BlockTopKSegmentCollector {
     fn new(
         segment_ord: SegmentOrdinal,
-        readers: Vec<Column<u64>>,
+        readers: Vec<BlockSortReader>,
         orders: Vec<Order>,
         top_n: usize,
     ) -> Self {
@@ -159,6 +185,7 @@ impl BlockTopKSegmentCollector {
             readers,
             values,
             top_hits: BufferedTopK::new(top_n, orders),
+            encoded: Vec::new(),
         }
     }
 
@@ -180,7 +207,7 @@ impl SegmentCollector for BlockTopKSegmentCollector {
 
     fn collect_block(&mut self, docs: &[DocId]) {
         for (reader, values) in self.readers.iter().zip(&mut self.values) {
-            reader.first_vals(docs, &mut values[..docs.len()]);
+            reader.fill(docs, &mut values[..docs.len()], &mut self.encoded);
         }
         for (index, doc) in docs.iter().copied().enumerate() {
             let first = self.values[0][index];
@@ -194,13 +221,47 @@ impl SegmentCollector for BlockTopKSegmentCollector {
     }
 
     fn collect(&mut self, doc: DocId, _score: Score) {
-        let first = self.readers[0].first(doc);
-        let second = self.readers.get(1).and_then(|reader| reader.first(doc));
+        let first = self.readers[0].value(doc, &mut self.encoded);
+        let second = self
+            .readers
+            .get(1)
+            .and_then(|reader| reader.value(doc, &mut self.encoded));
         self.push_doc(doc, first, second);
     }
 
     fn harvest(self) -> Self::Fruit {
         self.top_hits.finish()
+    }
+}
+
+impl BlockSortReader {
+    fn fill(&self, docs: &[DocId], output: &mut [Option<u64>], encoded: &mut Vec<u8>) {
+        match self {
+            Self::Numeric(column) => column.first_vals(docs, output),
+            Self::Geo {
+                coordinates,
+                origin,
+                mode,
+            } => {
+                for (doc, value) in docs.iter().zip(output) {
+                    *value =
+                        geo_distance_value_with_buffer(coordinates, *doc, *origin, *mode, encoded)
+                            .map(f64::to_u64);
+                }
+            }
+        }
+    }
+
+    fn value(&self, doc: DocId, encoded: &mut Vec<u8>) -> Option<u64> {
+        match self {
+            Self::Numeric(column) => column.first(doc),
+            Self::Geo {
+                coordinates,
+                origin,
+                mode,
+            } => geo_distance_value_with_buffer(coordinates, doc, *origin, *mode, encoded)
+                .map(f64::to_u64),
+        }
     }
 }
 

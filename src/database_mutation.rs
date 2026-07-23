@@ -134,7 +134,7 @@ impl Database {
         };
         let fields = schema_fields(&index.schema(), def)?;
         let searcher = reader.searcher();
-        validate_filter_only_json_paths(&searcher, def, Some(&filter))?;
+        validate_filter_only_json_paths(&searcher, def, Some(&filter), None)?;
         let query = compile_filter(&index, def, &fields, Some(&filter))?.query;
         let addresses = searcher.search(&*query, &DocSetCollector)?;
         let projected = [primary_key];

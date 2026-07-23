@@ -124,11 +124,12 @@ Explicit native sorts return `next_search_after` for keyset pagination. Supplyin
 request compiles a lexicographic Tantivy range boundary and avoids deep `offset` collection. The
 primary key is automatically appended as a stable tie-breaker.
 
-One- and two-column scalar sorts use a block collector: fast-field values are decoded for Tantivy's
-document blocks and reduced through a bounded buffered top-K. Other native sorts retain Tantivy's
-generic bounded `TopDocs` path. When a single segment contains at least 250,000 documents, scalar
-sorts split its `DocId` space across the shared search pool, retain a local top-K per range, and
-merge those bounded results globally.
+One- and two-column scalar or geo-distance sorts use a block collector: fast-field values are
+decoded for Tantivy's document blocks and reduced through a bounded buffered top-K. Sorts that also
+return or order by relevance retain scores in the bounded collector instead of materializing every
+matching row. Other native sorts retain Tantivy's generic bounded `TopDocs` path. When a single
+segment contains at least 250,000 documents, supported sorts split its `DocId` space across the
+shared search pool, retain a local top-K per range, and merge those bounded results globally.
 
 An empty projection returns all table columns. Explicit projections may contain columns, `_score`,
 or aggregate metrics. `Count`, `Sum`, `Average`, `Min`, and `Max` use Tantivy aggregation
@@ -137,6 +138,8 @@ read. `Database::explain_score(&request, &identity_filter)` returns Tantivy's re
 explanation for one hit. HTTP exposes it at
 `POST /api/v1/tables/{table}/rows/{key}/explain-score`. Highlight projections use Tantivy's actual
 field tokenizer and `SnippetGenerator`, returning escaped HTML with matched tokens inside `<b>`.
+For latency-sensitive HTTP reads, prefer an explicit projection: an empty projection intentionally
+decodes every column, including JSON objects, arrays, and blobs.
 
 `SearchService` shares one bounded CPU pool across aggregation work. By default its size is the
 parallelism available to the process. Completed aggregation trees are cached by table generation,

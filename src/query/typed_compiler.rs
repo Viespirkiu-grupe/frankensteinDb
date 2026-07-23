@@ -23,6 +23,20 @@ fn compile_filter_node(
     fields: &IndexFields,
     filter: &Filter,
 ) -> Result<Box<dyn Query>> {
+    let query = compile_filter_node_raw(index, def, fields, filter)?;
+    if filter_contributes_score(filter) {
+        Ok(query)
+    } else {
+        Ok(Box::new(ConstScoreQuery::new(query, 0.0)))
+    }
+}
+
+fn compile_filter_node_raw(
+    index: &Index,
+    def: &TableDef,
+    fields: &IndexFields,
+    filter: &Filter,
+) -> Result<Box<dyn Query>> {
     match filter {
         Filter::Compare {
             column: name,
@@ -30,9 +44,7 @@ fn compile_filter_node(
             value,
         } => {
             queryable_column(def, name)?;
-            constant_filter(compile_typed_comparison(
-                def, fields, name, *operator, value,
-            ))
+            compile_typed_comparison(def, fields, name, *operator, value)
         }
         Filter::Between {
             column: name,
@@ -40,10 +52,10 @@ fn compile_filter_node(
             upper,
         } => {
             let column = queryable_column(def, name)?;
-            constant_filter(Ok(Box::new(RangeQuery::new(
+            Ok(Box::new(RangeQuery::new(
                 Bound::Included(term_for_value(fields, column, lower)?),
                 Bound::Included(term_for_value(fields, column, upper)?),
-            ))))
+            )))
         }
         Filter::In {
             column: name,
@@ -55,7 +67,7 @@ fn compile_filter_node(
                 .iter()
                 .map(|value| term_for_value(fields, column, value))
                 .collect::<Result<Vec<_>>>()?;
-            constant_filter(Ok(Box::new(TermSetQuery::new(terms))))
+            Ok(Box::new(TermSetQuery::new(terms)))
         }
         Filter::IsNull {
             column: name,
@@ -65,7 +77,7 @@ fn compile_filter_node(
                 existence_field(queryable_column(def, name)?),
                 false,
             ));
-            constant_filter(if *negated { Ok(query) } else { negate(query) })
+            if *negated { Ok(query) } else { negate(query) }
         }
         Filter::Search {
             fields: names,
@@ -144,19 +156,17 @@ fn compile_filter_node(
             data_type,
             operator,
             value,
-        } => constant_filter(compile_json_comparison(
-            index, def, column, path, *data_type, *operator, value,
-        )),
+        } => compile_json_comparison(index, def, column, path, *data_type, *operator, value),
         Filter::JsonBetween {
             column,
             path,
             data_type,
             lower,
             upper,
-        } => constant_filter(Ok(Box::new(RangeQuery::new(
+        } => Ok(Box::new(RangeQuery::new(
             Bound::Included(json_path_term(index, def, column, path, *data_type, lower)?),
             Bound::Included(json_path_term(index, def, column, path, *data_type, upper)?),
-        )))),
+        ))),
         Filter::JsonExists {
             column,
             path,
@@ -165,21 +175,15 @@ fn compile_filter_node(
         } => {
             let query: Box<dyn Query> =
                 Box::new(ExistsQuery::new(json_path_field(def, column, path)?, false));
-            constant_filter(if *negated { negate(query) } else { Ok(query) })
+            if *negated { negate(query) } else { Ok(query) }
         }
         Filter::GeoDistance {
             column,
             center,
             radius_meters,
-        } => constant_filter(compile_geo_radius(
-            index,
-            def,
-            column,
-            *center,
-            *radius_meters,
-        )),
+        } => compile_geo_radius(index, def, column, *center, *radius_meters),
         Filter::GeoBoundingBox { column, bounds } => {
-            constant_filter(compile_geo_bounds(index, def, column, *bounds))
+            compile_geo_bounds(index, def, column, *bounds)
         }
         Filter::GeoDistanceCompare {
             column,
@@ -187,7 +191,7 @@ fn compile_filter_node(
             mode,
             operator,
             distance_meters,
-        } => constant_filter(compile_geo_distance_comparison(
+        } => compile_geo_distance_comparison(
             index,
             def,
             column,
@@ -195,12 +199,24 @@ fn compile_filter_node(
             *mode,
             *operator,
             *distance_meters,
-        )),
-        Filter::All { filters } => compile_boolean(index, def, fields, filters, Occur::Must),
-        Filter::Any { filters } => compile_boolean(index, def, fields, filters, Occur::Should),
-        Filter::Not { filter } => {
-            constant_filter(negate(compile_filter_node(index, def, fields, filter)?))
-        }
+        ),
+        Filter::All { filters } => compile_boolean(
+            index,
+            def,
+            fields,
+            filters,
+            Occur::Must,
+            filter_contributes_score(filter),
+        ),
+        Filter::Any { filters } => compile_boolean(
+            index,
+            def,
+            fields,
+            filters,
+            Occur::Should,
+            filter_contributes_score(filter),
+        ),
+        Filter::Not { filter } => negate(compile_filter_node_raw(index, def, fields, filter)?),
     }
 }
 
@@ -243,16 +259,13 @@ fn compile_json_comparison(
     }
 }
 
-fn constant_filter(query: Result<Box<dyn Query>>) -> Result<Box<dyn Query>> {
-    Ok(Box::new(ConstScoreQuery::new(query?, 0.0)))
-}
-
 fn compile_boolean(
     index: &Index,
     def: &TableDef,
     fields: &IndexFields,
     filters: &[Filter],
     occur: Occur,
+    wrap_children: bool,
 ) -> Result<Box<dyn Query>> {
     ensure!(
         !filters.is_empty(),
@@ -260,7 +273,14 @@ fn compile_boolean(
     );
     let clauses = filters
         .iter()
-        .map(|filter| Ok((occur, compile_filter_node(index, def, fields, filter)?)))
+        .map(|filter| {
+            let query = if wrap_children {
+                compile_filter_node(index, def, fields, filter)?
+            } else {
+                compile_filter_node_raw(index, def, fields, filter)?
+            };
+            Ok((occur, query))
+        })
         .collect::<Result<Vec<_>>>()?;
     Ok(Box::new(BooleanQuery::new(clauses)))
 }

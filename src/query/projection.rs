@@ -1,25 +1,45 @@
 use super::*;
 
 pub(crate) fn row_value<'a>(row: &'a ResultRow, name: &str) -> Option<&'a Value> {
-    row.values
-        .iter()
-        .find(|(column, _)| column.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value)
+    row.columns
+        .get(&name.to_ascii_lowercase())
+        .and_then(|index| row.values.get(*index))
 }
 
-pub(crate) fn sort_source(rows: &mut [ResultRow], order: &[OrderSpec]) -> Result<()> {
-    for spec in order.iter().rev() {
-        rows.sort_by(|left, right| {
-            let comparison =
-                compare_json(&sort_row_value(left, spec), &sort_row_value(right, spec));
+pub(crate) fn sort_source(rows: &mut Vec<ResultRow>, order: &[OrderSpec]) -> Result<()> {
+    let mut keyed = rows
+        .drain(..)
+        .map(|row| {
+            let keys = order
+                .iter()
+                .map(|spec| sort_row_value(&row, spec))
+                .collect::<Vec<_>>();
+            (keys, row)
+        })
+        .collect::<Vec<_>>();
+    keyed.sort_by(|(left, _), (right, _)| compare_ordered_values(left, right, order));
+    rows.extend(keyed.into_iter().map(|(_, row)| row));
+    Ok(())
+}
+
+fn compare_ordered_values(
+    left: &[Value],
+    right: &[Value],
+    order: &[OrderSpec],
+) -> std::cmp::Ordering {
+    left.iter()
+        .zip(right)
+        .zip(order)
+        .map(|((left, right), spec)| {
+            let comparison = compare_json(left, right);
             if spec.asc {
                 comparison
             } else {
                 comparison.reverse()
             }
-        });
-    }
-    Ok(())
+        })
+        .find(|comparison| !comparison.is_eq())
+        .unwrap_or(std::cmp::Ordering::Equal)
 }
 
 pub(crate) fn sort_row_value(row: &ResultRow, spec: &OrderSpec) -> Value {
@@ -64,16 +84,20 @@ pub(crate) fn sort_projected(
             Ok((index, spec.asc))
         })
         .collect::<Result<Vec<_>>>()?;
-    for (index, ascending) in specs.into_iter().rev() {
-        rows.sort_by(|left, right| {
-            let comparison = compare_json(&left[index], &right[index]);
-            if ascending {
-                comparison
-            } else {
-                comparison.reverse()
-            }
-        });
-    }
+    rows.sort_by(|left, right| {
+        specs
+            .iter()
+            .map(|(index, ascending)| {
+                let comparison = compare_json(&left[*index], &right[*index]);
+                if *ascending {
+                    comparison
+                } else {
+                    comparison.reverse()
+                }
+            })
+            .find(|comparison| !comparison.is_eq())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(())
 }
 
@@ -88,7 +112,46 @@ fn compare_json(left: &Value, right: &Value) -> std::cmp::Ordering {
             .unwrap_or(std::cmp::Ordering::Equal),
         (Value::String(left), Value::String(right)) => left.cmp(right),
         (Value::Bool(left), Value::Bool(right)) => left.cmp(right),
-        _ => left.to_string().cmp(&right.to_string()),
+        (Value::Array(left), Value::Array(right)) => compare_json_slices(left, right),
+        (Value::Object(left), Value::Object(right)) => {
+            let mut left = left.iter();
+            let mut right = right.iter();
+            loop {
+                match (left.next(), right.next()) {
+                    (Some((left_key, left)), Some((right_key, right))) => {
+                        let comparison = left_key
+                            .cmp(right_key)
+                            .then_with(|| compare_json(left, right));
+                        if !comparison.is_eq() {
+                            break comparison;
+                        }
+                    }
+                    (Some(_), None) => break std::cmp::Ordering::Greater,
+                    (None, Some(_)) => break std::cmp::Ordering::Less,
+                    (None, None) => break std::cmp::Ordering::Equal,
+                }
+            }
+        }
+        _ => json_type_rank(left).cmp(&json_type_rank(right)),
+    }
+}
+
+fn compare_json_slices(left: &[Value], right: &[Value]) -> std::cmp::Ordering {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| compare_json(left, right))
+        .find(|comparison| !comparison.is_eq())
+        .unwrap_or_else(|| left.len().cmp(&right.len()))
+}
+
+fn json_type_rank(value: &Value) -> u8 {
+    match value {
+        Value::Null => 0,
+        Value::Bool(_) => 1,
+        Value::Number(_) => 2,
+        Value::String(_) => 3,
+        Value::Array(_) => 4,
+        Value::Object(_) => 5,
     }
 }
 
@@ -129,8 +192,8 @@ pub(crate) fn collect_native_sorted_docs(
 pub(crate) fn block_top_k_supported(sort: &NativeSort) -> bool {
     (1..=2).contains(&sort.fields.len())
         && sort.fields.iter().all(|field| {
-            field.geo_distance_from.is_none()
-                && matches!(
+            field.geo_distance_from.is_some()
+                || matches!(
                     field.data_type,
                     ColumnType::Integer
                         | ColumnType::Unsigned
@@ -235,7 +298,7 @@ impl SortKeyComputer for DynamicSortKeyComputer {
     }
 }
 
-fn sort_fast_values(
+pub(super) fn sort_fast_values(
     fast_fields: &tantivy::fastfield::FastFieldReaders,
     field: &NativeSortField,
 ) -> tantivy::Result<FastValues> {

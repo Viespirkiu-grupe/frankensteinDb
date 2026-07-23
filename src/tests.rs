@@ -11,6 +11,7 @@ mod geo_support;
 mod geo_tests;
 mod json_aggregation_tests;
 mod mutation_tests;
+mod performance_tests;
 mod query_tests;
 mod recovery_tests;
 mod schema_search_tests;

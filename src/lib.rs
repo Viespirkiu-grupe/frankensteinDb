@@ -10,6 +10,7 @@ use serde_json::{Number, Value, json};
 use std::ops::Bound;
 use tantivy::aggregation::{
     AggContextParams, AggregationCollector, AggregationLimitsGuard, agg_req::Aggregations,
+    agg_result::AggregationResults,
 };
 use tantivy::collector::sort_key::{Comparator, ComparatorEnum};
 use tantivy::collector::{
@@ -58,7 +59,8 @@ pub use geo::{
 };
 use geo::{
     collect_geo_tile_grid, compile_geo_bounds, compile_geo_distance_comparison, compile_geo_radius,
-    contains_geo_aggregation, decode_points, distance_for_points, geo_coordinate_field,
+    contains_geo_aggregation, decode_points, distance_for_encoded_points, distance_for_points,
+    geo_coordinate_field,
 };
 
 mod aggregation_model;
@@ -93,16 +95,23 @@ pub struct Database {
 #[derive(Clone)]
 pub struct SearchService {
     root: PathBuf,
-    tables: Arc<RwLock<HashMap<String, SearchHandle>>>,
+    tables: Arc<RwLock<SearchCatalog>>,
     runtime: Arc<SearchRuntime>,
 }
 
 #[derive(Clone)]
 struct SearchHandle {
-    def: TableDef,
+    def: Arc<TableDef>,
+    fields: Arc<IndexFields>,
     index: Index,
     reader: IndexReader,
     generation: u64,
+}
+
+#[derive(Default)]
+struct SearchCatalog {
+    canonical: HashMap<String, Arc<SearchHandle>>,
+    lookup: HashMap<String, Arc<SearchHandle>>,
 }
 
 #[derive(Debug, Clone)]

@@ -2,7 +2,9 @@ use super::*;
 use crate::aggregation_api::{
     collect_intermediate, collect_standard_aggregations, compile_aggregations, merge_intermediates,
 };
-use crate::database_read::{execute_typed_read, explain_typed_read, explain_typed_score};
+use crate::database_read::{
+    execute_typed_read, explain_typed_read, explain_typed_score, typed_read_is_wide,
+};
 use crate::search_runtime::AggregationCacheKey;
 
 impl SearchService {
@@ -66,11 +68,15 @@ impl SearchService {
     /// Executes a typed read using only the published Tantivy snapshot.
     pub fn read(&self, request: ReadRequest) -> Result<QueryResult> {
         let handle = self.handle(&request.table)?;
+        let _wide_query = typed_read_is_wide(&handle.def, &request)
+            .then(|| self.runtime.acquire_wide_query())
+            .transpose()?;
         let json_cache = self.json_cache(&handle);
         execute_typed_read(
             &handle.def,
             &handle.index,
             &handle.reader,
+            &handle.fields,
             request,
             &self.runtime.pool,
             Some(&json_cache),
@@ -85,6 +91,7 @@ impl SearchService {
             &handle.def,
             &handle.index,
             &handle.reader,
+            &handle.fields,
             request,
             Some(&json_cache),
         )
@@ -98,6 +105,7 @@ impl SearchService {
             &handle.def,
             &handle.index,
             &handle.reader,
+            &handle.fields,
             request,
             identity,
             Some(&json_cache),
@@ -139,6 +147,7 @@ impl SearchService {
         filter: Option<&Filter>,
         aggregations: BTreeMap<String, Aggregation>,
     ) -> Result<Value> {
+        let _wide_query = self.runtime.acquire_wide_query()?;
         let searcher = handle.reader.searcher();
         let json_cache = self.json_cache(handle);
         validate_filter_only_json_paths(&searcher, &handle.def, filter, Some(&json_cache))?;
@@ -155,14 +164,21 @@ impl SearchService {
         }
         let mut result = serde_json::Map::new();
         if !standard.is_empty() {
-            result.extend(collect_standard_aggregations(
+            let standard = collect_standard_aggregations(
                 &searcher,
                 &*query,
                 &handle.def,
                 &handle.index,
                 standard,
                 &self.runtime.pool,
-            )?);
+            )?;
+            let value = serde_json::to_value(standard)?;
+            result.extend(
+                value
+                    .as_object()
+                    .context("Tantivy aggregation response is not an object")?
+                    .clone(),
+            );
         }
         for (name, aggregation) in geo {
             result.insert(
@@ -185,6 +201,7 @@ impl SearchService {
             "geo_tile_grid does not support distributed intermediate results"
         );
         let handle = self.handle(table)?;
+        let _wide_query = self.runtime.acquire_wide_query()?;
         let searcher = handle.reader.searcher();
         let json_cache = self.json_cache(&handle);
         validate_filter_only_json_paths(&searcher, &handle.def, filter, Some(&json_cache))?;
@@ -206,6 +223,7 @@ impl SearchService {
             "geo_tile_grid does not support distributed intermediate results"
         );
         let handle = self.handle(table)?;
+        let _wide_query = self.runtime.acquire_wide_query()?;
         let json_cache = self.json_cache(&handle);
         validate_json_aggregation_paths(
             &handle.reader.searcher(),

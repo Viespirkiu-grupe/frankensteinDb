@@ -8,8 +8,9 @@ impl Database {
         let handle = self.index_handle(&def)?;
         let index = handle.index.clone();
         let reader = handle.reader.clone();
+        let fields = schema_fields(&index.schema(), &def)?;
         let pool = crate::search_runtime::system_search_pool()?;
-        execute_typed_read(&def, &index, &reader, request, &pool, None)
+        execute_typed_read(&def, &index, &reader, &fields, request, &pool, None)
     }
 
     /// Describes the Tantivy collector and typed read plan without executing the search.
@@ -19,7 +20,8 @@ impl Database {
         let handle = self.index_handle(&def)?;
         let index = handle.index.clone();
         let reader = handle.reader.clone();
-        explain_typed_read(&def, &index, &reader, request, None)
+        let fields = schema_fields(&index.schema(), &def)?;
+        explain_typed_read(&def, &index, &reader, &fields, request, None)
     }
 
     /// Explains the BM25 score of one Tantivy document selected by an identity filter.
@@ -29,7 +31,8 @@ impl Database {
         let handle = self.index_handle(&def)?;
         let index = handle.index.clone();
         let reader = handle.reader.clone();
-        explain_typed_score(&def, &index, &reader, request, identity, None)
+        let fields = schema_fields(&index.schema(), &def)?;
+        explain_typed_score(&def, &index, &reader, &fields, request, identity, None)
     }
 }
 
@@ -37,6 +40,7 @@ pub(crate) fn explain_typed_score(
     def: &TableDef,
     index: &Index,
     reader: &IndexReader,
+    fields: &IndexFields,
     request: &ReadRequest,
     identity: &Filter,
     json_cache: Option<&JsonPathCacheContext<'_>>,
@@ -45,12 +49,11 @@ pub(crate) fn explain_typed_score(
         request.group_by.is_empty(),
         "score explanation does not support aggregation"
     );
-    let fields = schema_fields(&index.schema(), def)?;
     let searcher = reader.searcher();
     validate_json_read_paths(&searcher, def, request, json_cache)?;
     validate_filter_only_json_paths(&searcher, def, Some(identity), json_cache)?;
-    let query = compile_filter(index, def, &fields, request.filter.as_ref())?.query;
-    let identity_query = compile_filter(index, def, &fields, Some(identity))?.query;
+    let query = compile_filter(index, def, fields, request.filter.as_ref())?.query;
+    let identity_query = compile_filter(index, def, fields, Some(identity))?.query;
     let documents = searcher.search(&*identity_query, &DocSetCollector)?;
     ensure!(
         documents.len() == 1,
@@ -74,11 +77,11 @@ pub(crate) fn execute_typed_read(
     def: &TableDef,
     index: &Index,
     reader: &IndexReader,
+    fields: &IndexFields,
     request: ReadRequest,
     pool: &rayon::ThreadPool,
     json_cache: Option<&JsonPathCacheContext<'_>>,
 ) -> Result<QueryResult> {
-    let fields = schema_fields(&index.schema(), def)?;
     let searcher = reader.searcher();
     validate_json_read_paths(&searcher, def, &request, json_cache)?;
     let order = stable_typed_order(def, &request);
@@ -91,7 +94,7 @@ pub(crate) fn execute_typed_read(
             request.search_after.is_none(),
             "search_after is not supported for aggregations"
         );
-        let plan = compile_filter(index, def, &fields, request.filter.as_ref())?;
+        let plan = compile_filter(index, def, fields, request.filter.as_ref())?;
         return execute_typed_aggregation(
             &searcher,
             &*plan.query,
@@ -108,7 +111,10 @@ pub(crate) fn execute_typed_read(
         .then(|| typed_scored_sort(&request, def, &order))
         .flatten();
     let effective_filter = filter_after_cursor(def, &request, &order, native_sort.as_ref())?;
-    let plan = compile_filter(index, def, &fields, effective_filter.as_ref())?;
+    let score_order = effective_filter
+        .as_ref()
+        .is_some_and(filter_contributes_score);
+    let plan = compile_filter(index, def, fields, effective_filter.as_ref())?;
     let cursor_mode = cursor_pagination_enabled(def, &request, &order, native_sort.as_ref());
     let full_scan = typed_requires_full_scan(&request, &order)
         && native_sort.is_none()
@@ -116,47 +122,67 @@ pub(crate) fn execute_typed_read(
     let collection_limit = request
         .limit
         .saturating_add(usize::from(cursor_mode && request.limit > 0));
-    let mut docs = collect_typed_docs(
-        &searcher,
-        &*plan.query,
-        TypedCollection {
-            native_sort: native_sort.as_ref(),
-            scored_sort: scored_sort.as_ref(),
-            full_scan,
-            limit: collection_limit,
-            offset: request.offset,
-            pool,
-        },
-    )?;
-    if scored_sort.is_none()
-        && let Some(min_score) = request.min_score
-    {
-        docs.retain(|(score, _)| *score >= min_score);
-    }
     let projected = required_typed_columns(def, &request, &order, full_scan || cursor_mode)?;
-    let rows = load_typed_rows(&searcher, docs, &projected)?;
+    let rows = if full_scan {
+        collect_materialized_top_k(
+            &searcher,
+            &*plan.query,
+            &projected,
+            &order,
+            collection_limit,
+            request.offset,
+            pool,
+        )?
+    } else {
+        let mut docs = collect_typed_docs(
+            &searcher,
+            &*plan.query,
+            TypedCollection {
+                native_sort: native_sort.as_ref(),
+                scored_sort: scored_sort.as_ref(),
+                score_order,
+                limit: collection_limit,
+                offset: request.offset,
+                pool,
+            },
+        )?;
+        if scored_sort.is_none()
+            && let Some(min_score) = request.min_score
+        {
+            docs.retain(|(score, _)| *score >= min_score);
+        }
+        load_typed_rows(&searcher, docs, &projected)?
+    };
     let highlights =
         HighlightGenerators::create(&searcher, &index.schema(), def, &*plan.query, &request)?;
-    project_typed_rows(
-        def,
-        &request,
-        rows,
-        &order,
-        full_scan,
-        cursor_mode,
-        &highlights,
-    )
+    project_typed_rows(def, &request, rows, &order, false, cursor_mode, &highlights)
+}
+
+pub(crate) fn typed_read_is_wide(def: &TableDef, request: &ReadRequest) -> bool {
+    if typed_row_count_strategy(def, request).is_some() {
+        return false;
+    }
+    if typed_is_aggregation(request) {
+        return true;
+    }
+    let order = stable_typed_order(def, request);
+    let native_sort = typed_native_sort(request, def, &order);
+    let scored_sort = native_sort
+        .is_none()
+        .then(|| typed_scored_sort(request, def, &order))
+        .flatten();
+    typed_requires_full_scan(request, &order) && native_sort.is_none() && scored_sort.is_none()
 }
 
 pub(crate) fn explain_typed_read(
     def: &TableDef,
     index: &Index,
     reader: &IndexReader,
+    fields: &IndexFields,
     request: &ReadRequest,
     json_cache: Option<&JsonPathCacheContext<'_>>,
 ) -> Result<QueryResult> {
     validate_json_read_paths(&reader.searcher(), def, request, json_cache)?;
-    let fields = schema_fields(&index.schema(), def)?;
     let order = stable_typed_order(def, request);
     validate_typed_sort(def, &order)?;
     let aggregation = typed_is_aggregation(request);
@@ -167,8 +193,13 @@ pub(crate) fn explain_typed_read(
         .then(|| typed_scored_sort(request, def, &order))
         .flatten();
     let effective_filter = filter_after_cursor(def, request, &order, native_sort.as_ref())?;
-    compile_filter(index, def, &fields, effective_filter.as_ref())?;
-    let collector = if aggregation {
+    compile_filter(index, def, fields, effective_filter.as_ref())?;
+    let row_count = typed_row_count_strategy(def, request);
+    let collector = if matches!(row_count, Some(RowCountStrategy::Metadata)) {
+        "metadata_count"
+    } else if matches!(row_count, Some(RowCountStrategy::Collector)) {
+        "filtered_count"
+    } else if aggregation {
         "aggregation"
     } else if scored_sort.is_some() {
         "scored_fast_field_top_docs"
@@ -177,9 +208,18 @@ pub(crate) fn explain_typed_read(
     } else if native_sort.is_some() {
         "fast_field_top_docs"
     } else if typed_requires_full_scan(request, &order) {
-        "full_scan_top_docs"
-    } else {
+        "materialized_top_docs"
+    } else if request
+        .filter
+        .as_ref()
+        .is_some_and(filter_contributes_score)
+        || order
+            .iter()
+            .any(|spec| spec.key.eq_ignore_ascii_case("_score"))
+    {
         "score_top_docs"
+    } else {
+        "doc_order_top_docs"
     };
     Ok(QueryResult {
         columns: vec![
@@ -250,7 +290,7 @@ fn validate_typed_sort(def: &TableDef, order: &[OrderSpec]) -> Result<()> {
 struct TypedCollection<'a> {
     native_sort: Option<&'a NativeSort>,
     scored_sort: Option<&'a ScoredSort>,
-    full_scan: bool,
+    score_order: bool,
     limit: usize,
     offset: usize,
     pool: &'a rayon::ThreadPool,
@@ -263,17 +303,6 @@ fn collect_typed_docs(
 ) -> Result<Vec<(f32, DocAddress)>> {
     if let Some(sort) = collection.scored_sort {
         return collect_scored_top_k(searcher, query, sort, collection.limit, collection.offset);
-    }
-    if collection.full_scan {
-        let mut addresses = searcher
-            .search(query, &DocSetCollector)?
-            .into_iter()
-            .collect::<Vec<_>>();
-        addresses.sort_unstable();
-        return Ok(addresses
-            .into_iter()
-            .map(|address| (0.0, address))
-            .collect());
     }
     if collection.limit == 0 {
         return Ok(Vec::new());
@@ -288,12 +317,15 @@ fn collect_typed_docs(
             collection.pool,
         );
     }
-    Ok(searcher.search(
-        query,
-        &TopDocs::with_limit(collection.limit)
-            .and_offset(collection.offset)
-            .order_by_score(),
-    )?)
+    if collection.score_order {
+        return Ok(searcher.search(
+            query,
+            &TopDocs::with_limit(collection.limit)
+                .and_offset(collection.offset)
+                .order_by_score(),
+        )?);
+    }
+    collect_doc_order_top_k(searcher, query, collection.limit, collection.offset)
 }
 
 pub(crate) fn load_typed_rows(

@@ -23,6 +23,12 @@ struct TypedBucketPlan {
     order: Option<(String, Order)>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum RowCountStrategy {
+    Metadata,
+    Collector,
+}
+
 pub(crate) fn execute_typed_aggregation(
     searcher: &Searcher,
     query: &dyn Query,
@@ -36,6 +42,10 @@ pub(crate) fn execute_typed_aggregation(
         !request.projection.is_empty(),
         "aggregation requires an explicit projection"
     );
+    if let Some(strategy) = typed_row_count_strategy(def, request) {
+        let result = collect_fast_row_count(searcher, query, request, order, strategy)?;
+        return Ok(result);
+    }
     let groups = typed_groups(def, request)?;
     validate_group_projection(request, &groups)?;
     let (metrics, metric_requests) = typed_metrics(def, request)?;
@@ -79,6 +89,62 @@ pub(crate) fn execute_typed_aggregation(
         columns,
         rows,
         next_search_after: None,
+    })
+}
+
+fn collect_fast_row_count(
+    searcher: &Searcher,
+    query: &dyn Query,
+    request: &ReadRequest,
+    order: &[OrderSpec],
+    strategy: RowCountStrategy,
+) -> Result<QueryResult> {
+    let Projection::Aggregate { alias, .. } = &request.projection[0] else {
+        unreachable!("row-count strategy requires a count projection");
+    };
+    let count = match strategy {
+        RowCountStrategy::Metadata => searcher.num_docs(),
+        RowCountStrategy::Collector => searcher.search(query, &Count)? as u64,
+    };
+    let mut rows = if request.offset == 0 && request.limit > 0 {
+        vec![vec![json!(count)]]
+    } else {
+        Vec::new()
+    };
+    let columns = vec![alias.clone()];
+    sort_projected(&mut rows, &columns, order)?;
+    Ok(QueryResult {
+        columns,
+        message: format!("{} row(s)", rows.len()),
+        rows,
+        next_search_after: None,
+    })
+}
+
+pub(crate) fn typed_row_count_strategy(
+    def: &TableDef,
+    request: &ReadRequest,
+) -> Option<RowCountStrategy> {
+    if !request.group_by.is_empty() || request.projection.len() != 1 {
+        return None;
+    }
+    let Projection::Aggregate {
+        function: Aggregate::Count,
+        column,
+        ..
+    } = &request.projection[0]
+    else {
+        return None;
+    };
+    if let Some(name) = column
+        && !name.eq_ignore_ascii_case(&def.columns[primary_key_index(def)].name)
+    {
+        return None;
+    }
+    Some(if request.filter.is_none() {
+        RowCountStrategy::Metadata
+    } else {
+        RowCountStrategy::Collector
     })
 }
 

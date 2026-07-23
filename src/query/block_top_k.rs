@@ -4,7 +4,7 @@ use tantivy::query::EnableScoring;
 use tantivy::{COLLECT_BLOCK_BUFFER_LEN, SegmentOrdinal};
 
 use super::*;
-use crate::segment_ranges::{collect_matching_docs_in_range, segment_doc_ranges};
+use crate::segment_ranges::{collect_matching_docs_in_range, searcher_doc_ranges};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BlockSortKey {
@@ -49,10 +49,7 @@ fn collect_intra_segment(
     collector: &BlockTopKCollector,
     pool: &rayon::ThreadPool,
 ) -> Result<Option<Vec<DocAddress>>> {
-    let [reader] = searcher.segment_readers() else {
-        return Ok(None);
-    };
-    let ranges = segment_doc_ranges(reader.max_doc(), pool.current_num_threads());
+    let ranges = searcher_doc_ranges(searcher, pool.current_num_threads());
     if ranges.len() < 2 {
         return Ok(None);
     }
@@ -60,9 +57,9 @@ fn collect_intra_segment(
     let results = pool.install(|| {
         ranges
             .into_par_iter()
-            .map(|range| -> Result<_> {
-                let mut child = collector.for_segment(0, reader)?;
-                collect_matching_docs_in_range(&*weight, reader, range, |docs| {
+            .map(|work| -> Result<_> {
+                let mut child = collector.for_segment(work.segment_ord, work.reader)?;
+                collect_matching_docs_in_range(&*weight, work.reader, work.range, |docs| {
                     child.collect_block(docs);
                 })?;
                 Ok(child.harvest())

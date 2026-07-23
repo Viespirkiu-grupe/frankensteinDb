@@ -215,6 +215,7 @@ fn load_seed(
         &handle.def,
         &handle.index,
         &handle.reader,
+        &handle.fields,
         request,
         pool,
         None,

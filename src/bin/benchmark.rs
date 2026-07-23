@@ -12,6 +12,9 @@ use frankensteindb::{
 use serde::Serialize;
 use serde_json::Value;
 
+#[path = "../global_allocator.rs"]
+mod global_allocator;
+
 #[path = "benchmark/aggregation_suite.rs"]
 mod aggregation_suite;
 #[cfg(test)]

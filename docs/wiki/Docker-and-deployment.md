@@ -2,7 +2,9 @@
 
 The repository includes a multi-stage Alpine/musl image. The large Rust build environment is
 discarded; the final image contains only Alpine, CA certificates, `tini`, the HTTP server, and the
-admin CLI. The process runs as non-root UID/GID `10001`.
+admin CLI. The production binaries link jemalloc so multithreaded collectors do not rely on musl's
+allocator. Release builds use thin LTO and one codegen unit. The process runs as non-root UID/GID
+`10001`.
 
 ## Build locally
 

@@ -1,7 +1,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use super::*;
@@ -61,6 +62,7 @@ pub(crate) struct SearchRuntime {
     scheduled_warmups: Arc<Mutex<HashSet<(String, u64)>>>,
     warmup_fast_fields: bool,
     json_path_types: Mutex<HashMap<(String, u64, String), BTreeSet<DynamicColumnType>>>,
+    wide_queries: WideQueryLimiter,
 }
 
 impl SearchRuntime {
@@ -82,11 +84,16 @@ impl SearchRuntime {
             scheduled_warmups: Arc::new(Mutex::new(HashSet::new())),
             warmup_fast_fields: options.warmup_fast_fields,
             json_path_types: Mutex::new(HashMap::new()),
+            wide_queries: WideQueryLimiter::new(1),
         })
     }
 
     pub(crate) fn worker_threads(&self) -> usize {
         self.pool.current_num_threads()
+    }
+
+    pub(crate) fn acquire_wide_query(&self) -> Result<WideQueryPermit<'_>> {
+        self.wide_queries.acquire()
     }
 
     pub(crate) fn cached_aggregation(&self, key: &AggregationCacheKey) -> Option<Value> {
@@ -140,12 +147,57 @@ impl SearchRuntime {
             .unwrap_or(false);
         if should_schedule {
             let scheduled_warmups = Arc::clone(&self.scheduled_warmups);
+            let pool = Arc::clone(&self.pool);
             self.warmup_pool.spawn(move || {
-                let _ = warm_fast_fields(&handle);
+                let _ = warm_fast_fields(&handle, &pool);
                 if let Ok(mut warmups) = scheduled_warmups.lock() {
                     warmups.remove(&key);
                 }
             });
+        }
+    }
+}
+
+struct WideQueryLimiter {
+    active: Mutex<usize>,
+    available: Condvar,
+    limit: usize,
+}
+
+impl WideQueryLimiter {
+    fn new(limit: usize) -> Self {
+        Self {
+            active: Mutex::new(0),
+            available: Condvar::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    fn acquire(&self) -> Result<WideQueryPermit<'_>> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| anyhow!("wide-query limiter lock was poisoned"))?;
+        while *active >= self.limit {
+            active = self
+                .available
+                .wait(active)
+                .map_err(|_| anyhow!("wide-query limiter lock was poisoned"))?;
+        }
+        *active += 1;
+        Ok(WideQueryPermit { limiter: self })
+    }
+}
+
+pub(crate) struct WideQueryPermit<'a> {
+    limiter: &'a WideQueryLimiter,
+}
+
+impl Drop for WideQueryPermit<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.limiter.active.lock() {
+            *active = active.saturating_sub(1);
+            self.limiter.available.notify_one();
         }
     }
 }
@@ -209,7 +261,7 @@ impl AggregationCache {
     }
 }
 
-fn warm_fast_fields(handle: &SearchHandle) -> Result<()> {
+fn warm_fast_fields(handle: &SearchHandle, pool: &rayon::ThreadPool) -> Result<()> {
     let searcher = handle.reader.searcher();
     let fields = handle
         .def
@@ -233,25 +285,35 @@ fn warm_fast_fields(handle: &SearchHandle) -> Result<()> {
         })
         .map(|column| (aggregation_field(column), column.data_type))
         .collect::<Vec<_>>();
-    for segment in searcher.segment_readers() {
-        let max_doc = segment.max_doc();
-        for (field, data_type) in &fields {
-            if matches!(
-                data_type,
-                ColumnType::Text
-                    | ColumnType::TextArray
-                    | ColumnType::Facet
-                    | ColumnType::FacetArray
-            ) {
-                if let Some(column) = segment.fast_fields().str(field)? {
-                    warm_string_column(&column, max_doc)?;
+    let work = searcher
+        .segment_readers()
+        .iter()
+        .flat_map(|segment| {
+            fields
+                .iter()
+                .map(move |(field, data_type)| (segment, field, *data_type))
+        })
+        .collect::<Vec<_>>();
+    pool.install(|| {
+        work.into_par_iter()
+            .try_for_each(|(segment, field, data_type)| {
+                let max_doc = segment.max_doc();
+                if matches!(
+                    data_type,
+                    ColumnType::Text
+                        | ColumnType::TextArray
+                        | ColumnType::Facet
+                        | ColumnType::FacetArray
+                ) {
+                    if let Some(column) = segment.fast_fields().str(field)? {
+                        warm_string_column(&column, max_doc)?;
+                    }
+                } else if let Some((column, _)) = segment.fast_fields().u64_lenient(field)? {
+                    warm_column(&column, max_doc);
                 }
-            } else if let Some((column, _)) = segment.fast_fields().u64_lenient(field)? {
-                warm_column(&column, max_doc);
-            }
-        }
-    }
-    Ok(())
+                Ok(())
+            })
+    })
 }
 
 fn warm_column(column: &Column<u64>, max_doc: DocId) {
@@ -267,11 +329,7 @@ fn warm_column(column: &Column<u64>, max_doc: DocId) {
 }
 
 fn warm_string_column(column: &StrColumn, max_doc: DocId) -> Result<()> {
-    for doc in 0..max_doc {
-        for ordinal in column.term_ords(doc) {
-            std::hint::black_box(ordinal);
-        }
-    }
+    warm_column(column.ords(), max_doc);
     let mut value = String::new();
     for ordinal in 0..column.num_terms() as u64 {
         value.clear();
@@ -300,5 +358,28 @@ mod tests {
         cache.remove_table("a");
         assert_eq!(cache.get(&key("a", 1)), None);
         assert_eq!(cache.get(&key("b", 3)), Some(json!(3)));
+    }
+
+    #[test]
+    fn wide_query_limiter_releases_waiters_when_permit_drops() {
+        let limiter = Arc::new(WideQueryLimiter::new(1));
+        let first = limiter.acquire().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let waiting = Arc::clone(&limiter);
+        let thread = std::thread::spawn(move || {
+            let _permit = waiting.acquire().unwrap();
+            sender.send(()).unwrap();
+        });
+
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(20))
+                .is_err()
+        );
+        drop(first);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        thread.join().unwrap();
     }
 }

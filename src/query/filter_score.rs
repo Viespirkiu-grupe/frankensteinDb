@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn filter_contributes_score(filter: &Filter) -> bool {
+pub(crate) fn filter_contributes_score(filter: &Filter) -> bool {
     match filter {
         Filter::Search { .. }
         | Filter::SearchBoosted { .. }

@@ -1,7 +1,9 @@
 use std::ops::Range;
 
 use tantivy::query::Weight;
-use tantivy::{COLLECT_BLOCK_BUFFER_LEN, DocId, DocSet, SegmentReader, TERMINATED};
+use tantivy::{
+    COLLECT_BLOCK_BUFFER_LEN, DocId, DocSet, Searcher, SegmentOrdinal, SegmentReader, TERMINATED,
+};
 
 /// Avoids parallel setup for ranges too small to amortize independent scorers and collectors.
 #[cfg(not(test))]
@@ -9,14 +11,65 @@ pub(crate) const MIN_DOCS_PER_RANGE: usize = 250_000;
 #[cfg(test)]
 pub(crate) const MIN_DOCS_PER_RANGE: usize = 100;
 
+pub(crate) struct SegmentDocRange<'a> {
+    pub(crate) segment_ord: SegmentOrdinal,
+    pub(crate) reader: &'a SegmentReader,
+    pub(crate) range: Range<DocId>,
+}
+
+/// Plans at least one task per non-empty segment and spends remaining workers splitting
+/// the largest segments. Small ranges are not split because scorer setup would dominate.
+pub(crate) fn searcher_doc_ranges(
+    searcher: &Searcher,
+    requested_workers: usize,
+) -> Vec<SegmentDocRange<'_>> {
+    let segments = searcher
+        .segment_readers()
+        .iter()
+        .enumerate()
+        .filter(|(_, reader)| reader.max_doc() > 0)
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let target_tasks = requested_workers.max(1).max(segments.len());
+    let mut allocations = vec![1usize; segments.len()];
+    while allocations.iter().sum::<usize>() < target_tasks {
+        let candidate = segments
+            .iter()
+            .enumerate()
+            .filter(|(index, (_, reader))| {
+                allocations[*index] < useful_range_count(reader.max_doc(), requested_workers)
+            })
+            .max_by_key(|(index, (_, reader))| {
+                (reader.max_doc() as usize).div_ceil(allocations[*index] + 1)
+            })
+            .map(|(index, _)| index);
+        let Some(index) = candidate else {
+            break;
+        };
+        allocations[index] += 1;
+    }
+    segments
+        .into_iter()
+        .zip(allocations)
+        .flat_map(|((segment_ord, reader), workers)| {
+            segment_doc_ranges(reader.max_doc(), workers)
+                .into_iter()
+                .map(move |range| SegmentDocRange {
+                    segment_ord: segment_ord as SegmentOrdinal,
+                    reader,
+                    range,
+                })
+        })
+        .collect()
+}
+
 pub(crate) fn segment_doc_ranges(max_doc: DocId, requested_workers: usize) -> Vec<Range<DocId>> {
     if max_doc == 0 {
         return Vec::new();
     }
-    let useful_workers = (max_doc as usize)
-        .div_ceil(MIN_DOCS_PER_RANGE)
-        .max(1)
-        .min(requested_workers.max(1));
+    let useful_workers = useful_range_count(max_doc, requested_workers);
     let chunk_size = (max_doc as usize).div_ceil(useful_workers);
     (0..useful_workers)
         .map(|worker| {
@@ -26,6 +79,13 @@ pub(crate) fn segment_doc_ranges(max_doc: DocId, requested_workers: usize) -> Ve
         })
         .filter(|range| !range.is_empty())
         .collect()
+}
+
+fn useful_range_count(max_doc: DocId, requested_workers: usize) -> usize {
+    (max_doc as usize)
+        .div_ceil(MIN_DOCS_PER_RANGE)
+        .max(1)
+        .min(requested_workers.max(1))
 }
 
 pub(crate) fn collect_matching_docs_in_range(
@@ -57,6 +117,30 @@ pub(crate) fn collect_matching_docs_in_range(
     }
     if length > 0 {
         collect_block(&docs[..length]);
+    }
+    Ok(())
+}
+
+pub(crate) fn visit_matching_docs_in_range(
+    weight: &dyn Weight,
+    reader: &SegmentReader,
+    range: Range<DocId>,
+    mut visit: impl FnMut(DocId) -> anyhow::Result<bool>,
+) -> anyhow::Result<()> {
+    let mut scorer = weight.scorer(reader, 1.0)?;
+    let mut doc = scorer.doc();
+    if doc < range.start {
+        doc = scorer.seek(range.start);
+    }
+    while doc != TERMINATED && doc < range.end {
+        if reader
+            .alive_bitset()
+            .is_none_or(|alive| alive.is_alive(doc))
+            && !visit(doc)?
+        {
+            break;
+        }
+        doc = scorer.advance();
     }
     Ok(())
 }

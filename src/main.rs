@@ -7,6 +7,8 @@ use clap::{Parser, Subcommand};
 use frankensteindb::{Database, Mutation, OptimizeOptions, ReadRequest, TableDef};
 use serde::Serialize;
 
+mod global_allocator;
+
 #[derive(Debug, Parser)]
 #[command(about = "Typed FrankensteinDB administration CLI")]
 struct Args {

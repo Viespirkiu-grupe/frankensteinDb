@@ -5,6 +5,9 @@ use anyhow::Result;
 use clap::Parser;
 use frankensteindb::SearchOptions;
 
+#[path = "../global_allocator.rs"]
+mod global_allocator;
+
 #[path = "server/aggregation_api.rs"]
 mod aggregation_api;
 #[path = "server/api.rs"]

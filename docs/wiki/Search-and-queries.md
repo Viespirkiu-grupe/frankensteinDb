@@ -231,6 +231,12 @@ JSON-path sorting currently cannot use `search_after`.
 
 ## Sorting and pagination
 
+Without `order_by`, BM25-producing filters retain relevance order. Structural filters that do not
+produce scores stop after the requested window in segment/document order. That order is stable for
+a fixed index generation but is not an API guarantee; specify `order_by` whenever row order matters.
+Supported bounded sorts and aggregations execute segments concurrently and split large segments
+into document ranges across the configured search workers.
+
 ```json
 "order_by":[{"column":"created_at","descending":true}]
 ```

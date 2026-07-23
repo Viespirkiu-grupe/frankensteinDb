@@ -3,9 +3,7 @@ use tantivy::collector::{Collector, SegmentCollector};
 use tantivy::query::EnableScoring;
 
 use super::*;
-use crate::segment_ranges::{collect_matching_docs_in_range, segment_doc_ranges};
-
-const MAX_AGGREGATION_RANGE_WORKERS: usize = 2;
+use crate::segment_ranges::{collect_matching_docs_in_range, searcher_doc_ranges};
 
 pub(crate) fn collect_aggregation_results(
     searcher: &Searcher,
@@ -43,10 +41,7 @@ fn collect_aggregation_ranges(
     collector: &AggregationCollector,
     pool: &rayon::ThreadPool,
 ) -> Result<Option<AggregationResults>> {
-    let [reader] = searcher.segment_readers() else {
-        return Ok(None);
-    };
-    let ranges = segment_doc_ranges(reader.max_doc(), aggregation_pool_workers(pool));
+    let ranges = searcher_doc_ranges(searcher, pool.current_num_threads());
     if ranges.len() < 2 {
         return Ok(None);
     }
@@ -54,9 +49,9 @@ fn collect_aggregation_ranges(
     let results = pool.install(|| {
         ranges
             .into_par_iter()
-            .map(|range| -> Result<_> {
-                let mut child = collector.for_segment(0, reader)?;
-                collect_matching_docs_in_range(&*weight, reader, range, |docs| {
+            .map(|work| -> Result<_> {
+                let mut child = collector.for_segment(work.segment_ord, work.reader)?;
+                collect_matching_docs_in_range(&*weight, work.reader, work.range, |docs| {
                     child.collect_block(docs);
                 })?;
                 Ok(child.harvest())
@@ -76,7 +71,7 @@ pub(crate) fn collect_standard_aggregations(
     index: &Index,
     aggregations: BTreeMap<String, Aggregation>,
     pool: &rayon::ThreadPool,
-) -> Result<serde_json::Map<String, Value>> {
+) -> Result<AggregationResults> {
     match collect_intra_segment_aggregations(searcher, query, def, index, &aggregations, pool) {
         Ok(Some(result)) => return Ok(result),
         Ok(None) => {}
@@ -113,9 +108,9 @@ pub(crate) fn collect_standard_aggregations(
                 .collect::<Vec<_>>()
         })
     };
-    let mut combined = serde_json::Map::new();
+    let mut combined = AggregationResults::default();
     for result in results {
-        combined.extend(result?);
+        combined.0.extend(result?.0);
     }
     Ok(combined)
 }
@@ -140,7 +135,7 @@ fn collect_group_from_docs(
     aggregations: BTreeMap<String, Aggregation>,
     limits: AggregationLimitsGuard,
     docs: &[DocId],
-) -> Result<serde_json::Map<String, Value>> {
+) -> Result<AggregationResults> {
     let request = compile_aggregations(def, &aggregations)?;
     let collector =
         AggregationCollector::from_aggs(request, aggregation_context_with_limits(index, limits));
@@ -148,11 +143,7 @@ fn collect_group_from_docs(
     for block in docs.chunks(tantivy::COLLECT_BLOCK_BUFFER_LEN) {
         child.collect_block(block);
     }
-    let value = serde_json::to_value(collector.merge_fruits(vec![child.harvest()])?)?;
-    value
-        .as_object()
-        .cloned()
-        .context("Tantivy aggregation response is not an object")
+    Ok(collector.merge_fruits(vec![child.harvest()])?)
 }
 
 pub(crate) fn standard_aggregation_worker_count(
@@ -160,7 +151,7 @@ pub(crate) fn standard_aggregation_worker_count(
     aggregation_count: usize,
     pool: &rayon::ThreadPool,
 ) -> usize {
-    if aggregation_count == 0 || searcher.segment_readers().len() != 1 {
+    if aggregation_count == 0 {
         return 1;
     }
     let range_workers = aggregation_range_worker_count(searcher, pool);
@@ -177,17 +168,10 @@ pub(crate) fn aggregation_range_worker_count(
     searcher: &Searcher,
     pool: &rayon::ThreadPool,
 ) -> usize {
-    let [reader] = searcher.segment_readers() else {
-        return 1;
-    };
-    segment_doc_ranges(reader.max_doc(), aggregation_pool_workers(pool))
+    searcher_doc_ranges(searcher, pool.current_num_threads())
         .len()
+        .min(pool.current_num_threads())
         .max(1)
-}
-
-fn aggregation_pool_workers(pool: &rayon::ThreadPool) -> usize {
-    pool.current_num_threads()
-        .min(MAX_AGGREGATION_RANGE_WORKERS)
 }
 
 fn aggregation_memory_exceeded(error: &anyhow::Error) -> bool {
@@ -203,11 +187,8 @@ fn collect_intra_segment_aggregations(
     index: &Index,
     aggregations: &BTreeMap<String, Aggregation>,
     pool: &rayon::ThreadPool,
-) -> Result<Option<serde_json::Map<String, Value>>> {
-    let [reader] = searcher.segment_readers() else {
-        return Ok(None);
-    };
-    let ranges = segment_doc_ranges(reader.max_doc(), aggregation_pool_workers(pool));
+) -> Result<Option<AggregationResults>> {
+    let ranges = searcher_doc_ranges(searcher, pool.current_num_threads());
     if ranges.len() < 2 {
         return Ok(None);
     }
@@ -219,9 +200,9 @@ fn collect_intra_segment_aggregations(
     let results = pool.install(|| {
         ranges
             .into_par_iter()
-            .map(|range| -> Result<_> {
-                let mut child = collector.for_segment(0, reader)?;
-                collect_matching_docs_in_range(&*weight, reader, range, |docs| {
+            .map(|work| -> Result<_> {
+                let mut child = collector.for_segment(work.segment_ord, work.reader)?;
+                collect_matching_docs_in_range(&*weight, work.reader, work.range, |docs| {
                     child.collect_block(docs);
                 })?;
                 Ok(child.harvest())
@@ -229,10 +210,7 @@ fn collect_intra_segment_aggregations(
             .collect::<Vec<_>>()
     });
     let fruits = results.into_iter().collect::<Result<Vec<_>>>()?;
-    let value = serde_json::to_value(collector.merge_fruits(fruits)?)?;
-    Ok(Some(value.as_object().cloned().context(
-        "Tantivy aggregation response is not an object",
-    )?))
+    Ok(Some(collector.merge_fruits(fruits)?))
 }
 
 fn partition_aggregations(
@@ -253,18 +231,14 @@ fn collect_group(
     index: &Index,
     aggregations: BTreeMap<String, Aggregation>,
     limits: Option<AggregationLimitsGuard>,
-) -> Result<serde_json::Map<String, Value>> {
+) -> Result<AggregationResults> {
     let request = compile_aggregations(def, &aggregations)?;
     let context = limits.map_or_else(
         || aggregation_context(index),
         |limits| aggregation_context_with_limits(index, limits),
     );
     let collector = AggregationCollector::from_aggs(request, context);
-    let value = serde_json::to_value(searcher.search(query, &collector)?)?;
-    value
-        .as_object()
-        .cloned()
-        .context("Tantivy aggregation response is not an object")
+    Ok(searcher.search(query, &collector)?)
 }
 
 #[cfg(test)]

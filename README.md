@@ -43,6 +43,10 @@ cargo build --release
 cargo test --all-targets
 ```
 
+Release builds use thin LTO, one codegen unit, stripped symbols, and jemalloc in the shipped
+binaries. For machine-local benchmarking only, `RUSTFLAGS="-C target-cpu=native"` can additionally
+enable host-specific instructions; portable release artifacts do not set that flag.
+
 Do not run the large dataset benchmark as part of routine verification.
 
 ## Typed data model
@@ -129,12 +133,18 @@ decoded for Tantivy's document blocks and reduced through a bounded buffered top
 return or order by relevance retain scores in the bounded collector instead of materializing every
 matching row. Other native sorts retain Tantivy's generic bounded `TopDocs` path. When a single
 segment contains at least 250,000 documents, supported sorts split its `DocId` space across the
-shared search pool, retain a local top-K per range, and merge those bounded results globally.
+shared search pool. Multi-segment indexes execute segments concurrently and split large segments
+further, retaining a local top-K per range before merging bounded results globally. Structural
+filter reads without `order_by` or scoring stop after `offset + limit` matches in deterministic
+segment/document order; callers must still treat row order as unspecified without `order_by`.
+Fallback sorts over materialized JSON values also keep only a bounded top-K rather than every hit.
 
 An empty projection returns all table columns. Explicit projections may contain columns, `_score`,
-or aggregate metrics. `Count`, `Sum`, `Average`, `Min`, and `Max` use Tantivy aggregation
-collectors. `Database::explain(&request)` returns the chosen Tantivy collector without executing the
-read. `Database::explain_score(&request, &identity_filter)` returns Tantivy's recursive BM25
+or aggregate metrics. Ungrouped `Count` of rows uses index metadata for match-all requests and
+Tantivy's count collector for filtered requests; nullable-column counts retain `value_count`
+semantics. `Sum`, `Average`, `Min`, `Max`, and grouped metrics use Tantivy aggregation collectors.
+`Database::explain(&request)` returns the chosen Tantivy collector without executing the read.
+`Database::explain_score(&request, &identity_filter)` returns Tantivy's recursive BM25
 explanation for one hit. HTTP exposes it at
 `POST /api/v1/tables/{table}/rows/{key}/explain-score`. Highlight projections use Tantivy's actual
 field tokenizer and `SnippetGenerator`, returning escaped HTML with matched tokens inside `<b>`.
@@ -144,16 +154,18 @@ decodes every column, including JSON objects, arrays, and blobs.
 `SearchService` shares one bounded CPU pool across aggregation work. By default its size is the
 parallelism available to the process. Completed aggregation trees are cached by table generation,
 filter, and request (128 entries by default), and sortable/aggregatable fast fields are warmed in
-the background when an index opens or segment compaction publishes a generation. Embedded users can
-override these through `SearchOptions`. The server exposes matching options and environment
-variables: `--search-threads` (`FRANKENSTEINDB_SEARCH_THREADS`, zero means automatic),
+parallel segment/column batches when an index opens or segment compaction publishes a generation.
+One aggregation or fallback full-scan sort is admitted at a time so concurrent wide queries cannot
+multiply memory and CPU pressure; ordinary point and bounded reads remain unthrottled. Embedded
+users can override pool, cache, and warmup behavior through `SearchOptions`. The server exposes
+matching options and environment variables: `--search-threads`
+(`FRANKENSTEINDB_SEARCH_THREADS`, zero means automatic),
 `--aggregation-cache-entries` (`FRANKENSTEINDB_AGGREGATION_CACHE_ENTRIES`), and
 `--warmup-fast-fields` (`FRANKENSTEINDB_WARMUP_FAST_FIELDS`). Diagnostic `/profile` requests bypass
 the aggregation cache so their timings continue to represent actual Tantivy work.
-Large single-segment aggregations use the same `DocId` range partitioning: every worker evaluates
-the full aggregation tree over a disjoint range, after which Tantivy merges the intermediate
-results. This avoids rescanning the entire segment once per top-level aggregation and does not
-require reindexing.
+Aggregations use the same segment/range partitioning across the full search pool: segments execute
+concurrently, large segments split into disjoint ranges, and Tantivy merges the intermediate
+results. This avoids serial segment scans and does not require reindexing.
 
 ```rust
 use frankensteindb::{Filter, Projection, ReadRequest, Sort};

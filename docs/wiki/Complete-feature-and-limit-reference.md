@@ -118,6 +118,8 @@ JSON path types: `string`, `i64`, `u64`, `f64`, `bool`, and `date_time`. `date_t
   nullable/array sorting, or JSON-path sorting.
 - Geo-distance sorting is supported for scalar and array geo columns; a null/empty geo value cannot
   be the cursor boundary.
+- Row order is unspecified without `order_by`; non-scoring filters use bounded document-order
+  collection while scored text filters retain relevance order.
 
 ## Recursive aggregation variants
 

@@ -3,6 +3,9 @@ use tantivy::collector::{Collector, SegmentCollector};
 
 use super::*;
 
+mod segment;
+use segment::*;
+
 #[derive(Clone)]
 pub(crate) enum ScoredSortField {
     Score(Order),
@@ -109,11 +112,18 @@ pub(crate) fn collect_scored_top_k(
     Ok(searcher.search(query, &collector)?)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct ScoredHit {
-    key: Vec<OwnedValue>,
+    key: ScoredKey,
     score: f32,
     address: DocAddress,
+}
+
+#[derive(Debug)]
+enum ScoredKey {
+    One(OwnedValue),
+    Two(OwnedValue, OwnedValue),
+    Many(Vec<OwnedValue>),
 }
 
 struct ScoredTopKCollector {
@@ -147,7 +157,7 @@ impl Collector for ScoredTopKCollector {
             segment_ord,
             fields: self.fields.clone(),
             readers,
-            top_hits: BufferedScoredTopK::new(self.top_n, self.fields.clone()),
+            top_hits: BufferedSegmentScoredTopK::new(self.top_n, self.fields.clone()),
             min_score: self.min_score,
         })
     }
@@ -175,7 +185,7 @@ struct ScoredTopKSegmentCollector {
     segment_ord: SegmentOrdinal,
     fields: Vec<ScoredSortField>,
     readers: Vec<Option<FastValues>>,
-    top_hits: BufferedScoredTopK,
+    top_hits: BufferedSegmentScoredTopK,
     min_score: Option<f32>,
 }
 
@@ -186,19 +196,20 @@ impl SegmentCollector for ScoredTopKSegmentCollector {
         if self.min_score.is_some_and(|minimum| score < minimum) {
             return;
         }
-        let key = self
-            .fields
-            .iter()
-            .zip(&self.readers)
-            .map(|(field, reader)| match field {
-                ScoredSortField::Score(_) => OwnedValue::F64(score as f64),
-                ScoredSortField::Fast(_) => {
-                    let reader = reader.as_ref().expect("fast sort reader");
-                    reader.sort_owned_value(doc)
-                }
-            })
-            .collect();
-        self.top_hits.push(ScoredHit {
+        let value = |index: usize| {
+            segment_scored_value(
+                &self.fields[index],
+                self.readers[index].as_ref(),
+                doc,
+                score,
+            )
+        };
+        let key = match self.fields.len() {
+            1 => SegmentScoredKey::One(value(0)),
+            2 => SegmentScoredKey::Two(value(0), value(1)),
+            _ => SegmentScoredKey::Many((0..self.fields.len()).map(value).collect()),
+        };
+        self.top_hits.push(SegmentScoredHit {
             key,
             score,
             address: DocAddress::new(self.segment_ord, doc),
@@ -206,60 +217,15 @@ impl SegmentCollector for ScoredTopKSegmentCollector {
     }
 
     fn harvest(self) -> Self::Fruit {
-        self.top_hits.finish()
-    }
-}
-
-struct BufferedScoredTopK {
-    hits: Vec<ScoredHit>,
-    top_n: usize,
-    threshold: Option<ScoredHit>,
-    fields: Vec<ScoredSortField>,
-}
-
-impl BufferedScoredTopK {
-    fn new(top_n: usize, fields: Vec<ScoredSortField>) -> Self {
-        Self {
-            hits: Vec::with_capacity(top_n.max(1).saturating_mul(10)),
-            top_n,
-            threshold: None,
-            fields,
-        }
-    }
-
-    fn push(&mut self, hit: ScoredHit) {
-        if self.top_n == 0
-            || self
-                .threshold
-                .as_ref()
-                .is_some_and(|threshold| scored_output_order(&hit, threshold, &self.fields).is_ge())
-        {
-            return;
-        }
-        if self.hits.len() == self.hits.capacity() {
-            self.truncate();
-        }
-        self.hits.push(hit);
-    }
-
-    fn truncate(&mut self) {
-        if self.hits.len() <= self.top_n {
-            return;
-        }
-        self.hits.select_nth_unstable_by(self.top_n, |left, right| {
-            scored_output_order(left, right, &self.fields)
-        });
-        self.hits.truncate(self.top_n);
-        self.threshold = self
-            .hits
-            .iter()
-            .max_by(|left, right| scored_output_order(left, right, &self.fields))
-            .cloned();
-    }
-
-    fn finish(mut self) -> Vec<ScoredHit> {
-        self.truncate();
-        self.hits
+        self.top_hits
+            .finish()
+            .into_iter()
+            .map(|hit| ScoredHit {
+                key: materialize_scored_key(hit.key, &self.fields, &self.readers),
+                score: hit.score,
+                address: hit.address,
+            })
+            .collect()
     }
 }
 
@@ -268,22 +234,52 @@ fn scored_output_order(
     right: &ScoredHit,
     fields: &[ScoredSortField],
 ) -> std::cmp::Ordering {
-    for ((left, right), field) in left.key.iter().zip(&right.key).zip(fields) {
-        let order = match field {
-            ScoredSortField::Score(order)
-            | ScoredSortField::Fast(NativeSortField { order, .. }) => *order,
-        };
-        let comparison = owned_value_order(left, right);
-        let comparison = if order == Order::Asc {
-            comparison
-        } else {
-            comparison.reverse()
-        };
-        if !comparison.is_eq() {
-            return comparison;
+    scored_key_order(&left.key, &right.key, fields).then_with(|| left.address.cmp(&right.address))
+}
+
+fn scored_key_order(
+    left: &ScoredKey,
+    right: &ScoredKey,
+    fields: &[ScoredSortField],
+) -> std::cmp::Ordering {
+    match (left, right) {
+        (ScoredKey::One(left), ScoredKey::One(right)) => {
+            compare_scored_value(left, right, &fields[0])
+        }
+        (ScoredKey::Two(left_first, left_second), ScoredKey::Two(right_first, right_second)) => {
+            compare_scored_value(left_first, right_first, &fields[0])
+                .then_with(|| compare_scored_value(left_second, right_second, &fields[1]))
+        }
+        (ScoredKey::Many(left), ScoredKey::Many(right)) => left
+            .iter()
+            .zip(right)
+            .zip(fields)
+            .map(|((left, right), field)| compare_scored_value(left, right, field))
+            .find(|order| !order.is_eq())
+            .unwrap_or(std::cmp::Ordering::Equal),
+        _ => unreachable!("one collector uses one scored-key shape"),
+    }
+}
+
+fn compare_scored_value(
+    left: &OwnedValue,
+    right: &OwnedValue,
+    field: &ScoredSortField,
+) -> std::cmp::Ordering {
+    let comparison = owned_value_order(left, right);
+    if scored_field_order(field) == Order::Asc {
+        comparison
+    } else {
+        comparison.reverse()
+    }
+}
+
+fn scored_field_order(field: &ScoredSortField) -> Order {
+    match field {
+        ScoredSortField::Score(order) | ScoredSortField::Fast(NativeSortField { order, .. }) => {
+            *order
         }
     }
-    left.address.cmp(&right.address)
 }
 
 fn owned_value_order(left: &OwnedValue, right: &OwnedValue) -> std::cmp::Ordering {

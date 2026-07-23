@@ -22,7 +22,7 @@ pub(crate) fn sort_source(rows: &mut Vec<ResultRow>, order: &[OrderSpec]) -> Res
     Ok(())
 }
 
-fn compare_ordered_values(
+pub(super) fn compare_ordered_values(
     left: &[Value],
     right: &[Value],
     order: &[OrderSpec],

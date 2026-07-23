@@ -9,8 +9,12 @@ pub(super) struct ResultRow {
 
 mod highlight;
 pub(crate) use highlight::*;
+mod doc_order;
+pub(crate) use doc_order::*;
 mod json_path;
 pub(crate) use json_path::*;
+mod materialized_top_k;
+pub(crate) use materialized_top_k::*;
 
 pub(super) struct ProjectedFastReader {
     pub(super) data_type: ColumnType,
@@ -39,7 +43,7 @@ pub(super) enum FastValues {
 }
 
 impl FastValues {
-    fn segment_sort_value(&self, doc_id: DocId) -> Option<u64> {
+    pub(super) fn segment_sort_value(&self, doc_id: DocId) -> Option<u64> {
         match self {
             Self::Integer(values) => values.first(doc_id).map(i64::to_u64),
             Self::Unsigned(values) => values.first(doc_id),
@@ -60,7 +64,7 @@ impl FastValues {
         }
     }
 
-    fn global_sort_value(&self, value: Option<u64>) -> OwnedValue {
+    pub(super) fn global_sort_value(&self, value: Option<u64>) -> OwnedValue {
         let Some(value) = value else {
             return OwnedValue::Null;
         };
@@ -87,16 +91,6 @@ impl FastValues {
                     .expect("valid bytes fast-field dictionary");
                 OwnedValue::Bytes(output)
             }
-        }
-    }
-
-    fn sort_owned_value(&self, doc_id: DocId) -> OwnedValue {
-        match self {
-            Self::Ip(values) => values
-                .first(doc_id)
-                .map(OwnedValue::IpAddr)
-                .unwrap_or(OwnedValue::Null),
-            _ => self.global_sort_value(self.segment_sort_value(doc_id)),
         }
     }
 }
@@ -307,7 +301,7 @@ pub(super) use aggregation::*;
 use block_top_k::collect_block_top_k;
 pub(super) use compiler::*;
 pub(super) use cursor::*;
-use filter_score::*;
+pub(super) use filter_score::*;
 pub(super) use projection::*;
 pub(super) use scored_top_k::*;
 pub(super) use scoring::*;

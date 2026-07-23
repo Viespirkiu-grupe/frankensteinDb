@@ -450,5 +450,5 @@ fn intra_segment_ranges_match_single_worker_aggregation_results() {
         profile["aggregation_strategy"],
         json!("intra_segment_ranges")
     );
-    assert_eq!(profile["aggregation_workers"], json!(4));
+    assert_eq!(profile["aggregation_workers"], json!(2));
 }

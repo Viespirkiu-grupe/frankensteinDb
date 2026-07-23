@@ -1,5 +1,5 @@
 use super::*;
-use crate::aggregation_api::standard_aggregation_worker_count;
+use crate::aggregation_api::{aggregation_range_worker_count, standard_aggregation_worker_count};
 use crate::database_read::execute_typed_read;
 use crate::segment_ranges::segment_doc_ranges;
 
@@ -48,7 +48,9 @@ impl SearchService {
             standard_aggregation_count,
             &self.runtime.pool,
         );
-        let range_workers = searcher.segment_readers().first().map_or(1, |reader| {
+        let aggregation_range_workers =
+            aggregation_range_worker_count(&searcher, &self.runtime.pool);
+        let sort_range_workers = searcher.segment_readers().first().map_or(1, |reader| {
             segment_doc_ranges(reader.max_doc(), self.runtime.worker_threads())
                 .len()
                 .max(1)
@@ -57,7 +59,7 @@ impl SearchService {
             "none"
         } else if standard_aggregation_count == 0 {
             "geo"
-        } else if searcher.segment_readers().len() == 1 && range_workers > 1 {
+        } else if searcher.segment_readers().len() == 1 && aggregation_range_workers > 1 {
             "intra_segment_ranges"
         } else if aggregation_workers > 1 {
             "top_level_aggregations"
@@ -66,7 +68,7 @@ impl SearchService {
         };
         let parallel_block_sort = native_sort.as_ref().is_some_and(block_top_k_supported)
             && searcher.segment_readers().len() == 1
-            && range_workers > 1;
+            && sort_range_workers > 1;
         if !aggregations.is_empty() {
             self.aggregate_uncached(&request.table, request.filter.as_ref(), aggregations)?;
         }
@@ -95,7 +97,7 @@ impl SearchService {
             "aggregation_workers": aggregation_workers,
             "aggregation_strategy": aggregation_strategy,
             "search_worker_threads": self.runtime.worker_threads(),
-            "sort_workers": if parallel_block_sort { range_workers } else { 1 },
+            "sort_workers": if parallel_block_sort { sort_range_workers } else { 1 },
             "sort_strategy": if parallel_block_sort {
                 "intra_segment_ranges"
             } else if native_sort.as_ref().is_some_and(block_top_k_supported) {

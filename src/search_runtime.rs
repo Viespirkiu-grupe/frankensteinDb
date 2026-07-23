@@ -2,7 +2,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use super::*;
@@ -57,6 +56,7 @@ impl std::io::Write for DigestWriter<'_> {
 
 pub(crate) struct SearchRuntime {
     pub(crate) pool: Arc<rayon::ThreadPool>,
+    warmup_pool: Arc<rayon::ThreadPool>,
     cache: Mutex<AggregationCache>,
     scheduled_warmups: Arc<Mutex<HashSet<(String, u64)>>>,
     warmup_fast_fields: bool,
@@ -72,6 +72,12 @@ impl SearchRuntime {
         };
         Ok(Self {
             pool,
+            warmup_pool: Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(1)
+                    .thread_name(|_| "frankensteindb-warmup".into())
+                    .build()?,
+            ),
             cache: Mutex::new(AggregationCache::new(options.aggregation_cache_entries)),
             scheduled_warmups: Arc::new(Mutex::new(HashSet::new())),
             warmup_fast_fields: options.warmup_fast_fields,
@@ -134,10 +140,8 @@ impl SearchRuntime {
             .unwrap_or(false);
         if should_schedule {
             let scheduled_warmups = Arc::clone(&self.scheduled_warmups);
-            let pool = Arc::clone(&self.pool);
-            let executor = Arc::clone(&self.pool);
-            executor.spawn(move || {
-                let _ = warm_fast_fields(&handle, &pool);
+            self.warmup_pool.spawn(move || {
+                let _ = warm_fast_fields(&handle);
                 if let Ok(mut warmups) = scheduled_warmups.lock() {
                     warmups.remove(&key);
                 }
@@ -205,7 +209,7 @@ impl AggregationCache {
     }
 }
 
-fn warm_fast_fields(handle: &SearchHandle, pool: &rayon::ThreadPool) -> Result<()> {
+fn warm_fast_fields(handle: &SearchHandle) -> Result<()> {
     let searcher = handle.reader.searcher();
     let fields = handle
         .def
@@ -229,30 +233,25 @@ fn warm_fast_fields(handle: &SearchHandle, pool: &rayon::ThreadPool) -> Result<(
         })
         .map(|column| (aggregation_field(column), column.data_type))
         .collect::<Vec<_>>();
-    let segments = searcher.segment_readers();
-    pool.install(|| {
-        (0..segments.len().saturating_mul(fields.len()))
-            .into_par_iter()
-            .try_for_each(|work| -> Result<()> {
-                let segment = &segments[work / fields.len()];
-                let (field, data_type) = &fields[work % fields.len()];
-                let max_doc = segment.max_doc();
-                if matches!(
-                    data_type,
-                    ColumnType::Text
-                        | ColumnType::TextArray
-                        | ColumnType::Facet
-                        | ColumnType::FacetArray
-                ) {
-                    if let Some(column) = segment.fast_fields().str(field)? {
-                        warm_string_column(&column, max_doc)?;
-                    }
-                } else if let Some((column, _)) = segment.fast_fields().u64_lenient(field)? {
-                    warm_column(&column, max_doc);
+    for segment in searcher.segment_readers() {
+        let max_doc = segment.max_doc();
+        for (field, data_type) in &fields {
+            if matches!(
+                data_type,
+                ColumnType::Text
+                    | ColumnType::TextArray
+                    | ColumnType::Facet
+                    | ColumnType::FacetArray
+            ) {
+                if let Some(column) = segment.fast_fields().str(field)? {
+                    warm_string_column(&column, max_doc)?;
                 }
-                Ok(())
-            })
-    })
+            } else if let Some((column, _)) = segment.fast_fields().u64_lenient(field)? {
+                warm_column(&column, max_doc);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn warm_column(column: &Column<u64>, max_doc: DocId) {
@@ -268,11 +267,11 @@ fn warm_column(column: &Column<u64>, max_doc: DocId) {
 }
 
 fn warm_string_column(column: &StrColumn, max_doc: DocId) -> Result<()> {
-    (0..max_doc).into_par_iter().for_each(|doc| {
-        column.term_ords(doc).for_each(|ordinal| {
+    for doc in 0..max_doc {
+        for ordinal in column.term_ords(doc) {
             std::hint::black_box(ordinal);
-        });
-    });
+        }
+    }
     let mut value = String::new();
     for ordinal in 0..column.num_terms() as u64 {
         value.clear();

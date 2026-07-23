@@ -5,6 +5,8 @@ use tantivy::query::EnableScoring;
 use super::*;
 use crate::segment_ranges::{collect_matching_docs_in_range, segment_doc_ranges};
 
+const MAX_AGGREGATION_RANGE_WORKERS: usize = 2;
+
 pub(crate) fn collect_aggregation_results(
     searcher: &Searcher,
     query: &dyn Query,
@@ -13,10 +15,24 @@ pub(crate) fn collect_aggregation_results(
     pool: &rayon::ThreadPool,
 ) -> Result<AggregationResults> {
     let limits = AggregationLimitsGuard::new(Some(128 * 1024 * 1024), Some(65_000));
-    let collector =
-        AggregationCollector::from_aggs(request, aggregation_context_with_limits(index, limits));
-    if let Some(result) = collect_aggregation_ranges(searcher, query, &collector, pool)? {
-        return Ok(result);
+    let collector = AggregationCollector::from_aggs(
+        request.clone(),
+        aggregation_context_with_limits(index, limits),
+    );
+    match collect_aggregation_ranges(searcher, query, &collector, pool) {
+        Ok(Some(result)) => return Ok(result),
+        Ok(None) => {}
+        Err(error) if aggregation_memory_exceeded(&error) => {
+            let collector = AggregationCollector::from_aggs(
+                request,
+                aggregation_context_with_limits(
+                    index,
+                    AggregationLimitsGuard::new(Some(128 * 1024 * 1024), Some(65_000)),
+                ),
+            );
+            return Ok(searcher.search(query, &collector)?);
+        }
+        Err(error) => return Err(error),
     }
     Ok(searcher.search(query, &collector)?)
 }
@@ -30,7 +46,7 @@ fn collect_aggregation_ranges(
     let [reader] = searcher.segment_readers() else {
         return Ok(None);
     };
-    let ranges = segment_doc_ranges(reader.max_doc(), pool.current_num_threads());
+    let ranges = segment_doc_ranges(reader.max_doc(), aggregation_pool_workers(pool));
     if ranges.len() < 2 {
         return Ok(None);
     }
@@ -61,10 +77,13 @@ pub(crate) fn collect_standard_aggregations(
     aggregations: BTreeMap<String, Aggregation>,
     pool: &rayon::ThreadPool,
 ) -> Result<serde_json::Map<String, Value>> {
-    if let Some(result) =
-        collect_intra_segment_aggregations(searcher, query, def, index, &aggregations, pool)?
-    {
-        return Ok(result);
+    match collect_intra_segment_aggregations(searcher, query, def, index, &aggregations, pool) {
+        Ok(Some(result)) => return Ok(result),
+        Ok(None) => {}
+        Err(error) if aggregation_memory_exceeded(&error) => {
+            return collect_group(searcher, query, def, index, aggregations, None);
+        }
+        Err(error) => return Err(error),
     }
     let worker_count = standard_aggregation_worker_count(searcher, aggregations.len(), pool);
     if worker_count == 1 {
@@ -144,11 +163,7 @@ pub(crate) fn standard_aggregation_worker_count(
     if aggregation_count == 0 || searcher.segment_readers().len() != 1 {
         return 1;
     }
-    let range_workers = segment_doc_ranges(
-        searcher.segment_readers()[0].max_doc(),
-        pool.current_num_threads(),
-    )
-    .len();
+    let range_workers = aggregation_range_worker_count(searcher, pool);
     if range_workers > 1 {
         return range_workers;
     }
@@ -156,6 +171,29 @@ pub(crate) fn standard_aggregation_worker_count(
         return 1;
     }
     pool.current_num_threads().min(aggregation_count)
+}
+
+pub(crate) fn aggregation_range_worker_count(
+    searcher: &Searcher,
+    pool: &rayon::ThreadPool,
+) -> usize {
+    let [reader] = searcher.segment_readers() else {
+        return 1;
+    };
+    segment_doc_ranges(reader.max_doc(), aggregation_pool_workers(pool))
+        .len()
+        .max(1)
+}
+
+fn aggregation_pool_workers(pool: &rayon::ThreadPool) -> usize {
+    pool.current_num_threads()
+        .min(MAX_AGGREGATION_RANGE_WORKERS)
+}
+
+fn aggregation_memory_exceeded(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("memory limit was exceeded"))
 }
 
 fn collect_intra_segment_aggregations(
@@ -169,7 +207,7 @@ fn collect_intra_segment_aggregations(
     let [reader] = searcher.segment_readers() else {
         return Ok(None);
     };
-    let ranges = segment_doc_ranges(reader.max_doc(), pool.current_num_threads());
+    let ranges = segment_doc_ranges(reader.max_doc(), aggregation_pool_workers(pool));
     if ranges.len() < 2 {
         return Ok(None);
     }

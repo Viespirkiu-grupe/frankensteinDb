@@ -34,7 +34,10 @@ curl http://localhost:8080/health
 
 The production image uses an Alpine/musl runtime, runs as non-root, and stores all persistent state
 in `/data`. See [Docker and deployment](docs/wiki/Docker-and-deployment.md) for GHCR tags, volumes,
-backup guidance, and production recommendations.
+backup guidance, production recommendations, and BuildKit cache behavior. The initial image build
+compiles the full release graph; later source-only builds reuse Cargo and native dependency caches.
+Set `FRANKENSTEINDB_BUILD_PROFILE=docker-dev` for faster incremental local image builds without
+thin LTO; production builds continue to default to the `release` profile.
 
 ## Build
 

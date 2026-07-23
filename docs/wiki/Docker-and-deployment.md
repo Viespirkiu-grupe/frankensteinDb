@@ -12,6 +12,23 @@ allocator. Release builds use thin LTO and one codegen unit. The process runs as
 docker build -t frankensteindb:local .
 ```
 
+The first build compiles the full release dependency graph, including jemalloc, and is expected to
+take several minutes. The Dockerfile uses persistent BuildKit caches for Cargo's registry, git
+checkouts, and release `target` directory. Later source-only builds reuse native and Rust dependency
+artifacts and normally rebuild only FrankensteinDB plus the final thin-LTO link. Running
+`docker builder prune` removes these caches. CI builders should export/import their BuildKit cache
+(`cache-to`/`cache-from`) because ephemeral runners do not retain local cache mounts.
+
+For rapid local source iteration, use the `docker-dev` Cargo profile:
+
+```bash
+FRANKENSTEINDB_BUILD_PROFILE=docker-dev docker compose build
+```
+
+It disables LTO, uses parallel code generation, and enables incremental compilation while retaining
+release optimizations. The default remains the fully optimized `release` profile used for production
+images. The development and production artifacts coexist in the persistent target cache.
+
 Run it with a named volume:
 
 ```bash

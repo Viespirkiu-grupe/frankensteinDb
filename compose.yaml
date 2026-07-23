@@ -6,6 +6,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BUILD_PROFILE: ${FRANKENSTEINDB_BUILD_PROFILE:-release}
     restart: unless-stopped
     ports:
       - "${FRANKENSTEINDB_PORT:-8080}:8080"
